@@ -1,0 +1,7 @@
+name: unifiedpush_linux
+description: "Empty stand-in for unifiedpush_linux. The app is Android only, and the real package pulls in webcrypto, whose build hook compiles BoringSSL with CMake for every target, Android ABIs included."
+version: 1.0.0
+publish_to: 'none'
+
+environment:
+  sdk: ^3.13.5
