@@ -108,12 +108,17 @@ import re  # noqa: E402
 import secrets  # noqa: E402
 import shlex  # noqa: E402
 import shutil  # noqa: E402
+import socket  # noqa: E402
 import subprocess  # noqa: E402
 import tempfile  # noqa: E402
 import textwrap  # noqa: E402
 import time  # noqa: E402
 import uuid  # noqa: E402
 from datetime import datetime  # noqa: E402
+
+VERSION = "0.2.0"
+# Peers on other machines must speak the same protocol (see `roster rpc`).
+PROTOCOL = 1
 
 STATE = os.path.join(
     os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
@@ -125,6 +130,11 @@ CONFIG = os.path.join(
     os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
     "roster",
 )
+# Where install.sh puts roster: CODE is this checkout or installed version,
+# HOME_BIN holds the wrappers the hooks and units call.
+CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+PREFIX = os.path.expanduser("~/.local/share/roster")
+HOME_BIN = os.path.expanduser("~/.local/bin")
 
 # Each level of a name is lowercase letters, digits, `_` and `-`. A level may
 # start with a digit, so the random ids `roster new` hands out are names too.
@@ -159,13 +169,13 @@ FRAME = (
 # not die with it.
 TMUX_SOCKET = os.environ.get("ROSTER_TMUX_SOCKET") or "roster"  # override for tests only
 TMUX_UNIT = "roster-tmux.service"
-# The window title tmux sets for an attached agent (set-titles-string in
-# tmux.conf); it is how roster finds an agent's window in niri.
-TITLE = "roster:%s"
+# The window title tmux sets for an attached agent, roster:<name>@<machine>
+# (set-titles-string in tmux.conf); it is how roster finds an agent's window.
+TITLE = "roster:%s@%s"
 SCRATCH_ROLE = "new agent; no name or task yet"
 # The terminal `attach` opens, unless ~/.config/roster/config.toml sets
 # `terminal`. The tmux attach command is appended; `{title}` is replaced.
-DEFAULT_TERMINAL = ["~/.local/share/mise/shims/kitty", "--class", "roster", "-o", "confirm_os_window_close=0"]
+DEFAULT_TERMINAL = ["kitty", "--class", "roster", "-o", "confirm_os_window_close=0"]
 MAIL_EVENTS = ("Stop", "PostToolUse", "UserPromptSubmit")
 # Notification types that mean the agent waits on the user.
 ASKING = ("permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input")
@@ -370,16 +380,44 @@ def fresh_marker(path, ttl):
 
 
 def tool(name):
-    """A tool's path. Roster also runs from the tray and from niri binds, whose
-    PATH has neither mise nor ~/.local/bin."""
+    """A tool's path. Roster also runs from the tray, from keybindings and over
+    SSH, whose PATH may have neither mise nor ~/.local/bin."""
     path = shutil.which(name)
     if path:
         return path
-    for d in ("~/.local/share/mise/shims", "~/.local/bin"):
+    for d in ("~/.local/share/mise/shims", "~/.local/bin", "~/.local/share/roster/tmux"):
         path = os.path.join(os.path.expanduser(d), name)
         if os.access(path, os.X_OK):
             return path
     raise Fail("%s not found" % name)
+
+
+_config = None
+
+
+def config():
+    """~/.config/roster/config.toml, or {} when there is none."""
+    global _config
+    if _config is None:
+        path = os.path.join(CONFIG, "config.toml")
+        try:
+            import tomllib
+            with open(path, "rb") as f:
+                _config = tomllib.load(f)
+        except FileNotFoundError:
+            _config = {}
+        except (OSError, ValueError) as exc:
+            raise Fail("%s: %s" % (path, exc))
+    return _config
+
+
+def machine():
+    """This machine's name on the roster: `machine` in config.toml, else the short hostname."""
+    return config().get("machine") or socket.gethostname().split(".")[0]
+
+
+def title(name, mach=None):
+    return TITLE % (name, mach or machine())
 
 
 def run(argv, timeout=15, env=None):
@@ -567,23 +605,17 @@ def tag_session(pane, name):
     return ""
 
 
-def terminal(name):
-    argv = DEFAULT_TERMINAL
-    path = os.path.join(CONFIG, "config.toml")
-    try:
-        import tomllib
-        with open(path, "rb") as f:
-            argv = tomllib.load(f).get("terminal") or argv
-    except FileNotFoundError:
-        pass
-    except (OSError, ValueError) as exc:
-        raise Fail("%s: %s" % (path, exc))
-    return [os.path.expanduser(a).replace("{title}", TITLE % name) for a in argv]
+def terminal(name, mach=None):
+    argv = [os.path.expanduser(a).replace("{title}", title(name, mach))
+            for a in config().get("terminal") or DEFAULT_TERMINAL]
+    if "/" not in argv[0]:
+        argv[0] = tool(argv[0])  # niri's PATH may not have it
+    return argv
 
 
-def agent_window(name):
+def agent_window(name, mach=None):
     for w in niri_json("windows") or []:
-        if w.get("title") == TITLE % name:
+        if w.get("title") == title(name, mach):
             return w
     return None
 
@@ -598,7 +630,7 @@ def user_is_on(e, a):
         w = niri_json("focused-window")
     except Fail:
         return True  # attached and we cannot tell: never inject
-    return bool(w) and w.get("title") == TITLE % e["name"]
+    return bool(w) and w.get("title") == title(e["name"])
 
 
 def submit(e, text):
@@ -1113,7 +1145,7 @@ def attach(e, a):
         return "focused %s" % name
     marker = os.path.join(agent_dir(name), "attaching")
     if a["attached"] or fresh_marker(marker, 5):
-        raise Fail("%s is already attached in a window roster cannot find (title %s)" % (name, TITLE % name))
+        raise Fail("%s is already attached in a window roster cannot find (title %s)" % (name, title(name)))
     write_atomic(marker, now() + "\n")
     niri("action", "spawn", "--", *terminal(name),
          tool("tmux"), "-L", TMUX_SOCKET, "attach-session", "-t", e["pane_id"])
@@ -1463,6 +1495,111 @@ def cmd_move(args):
         raise Fail("%d of %d not moved" % (failed, len(targets)))
 
 
+# --- install ---------------------------------------------------------------
+
+HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "StopFailure",
+               "Notification", "PermissionRequest", "SessionEnd")
+
+TMUX_SERVICE = """[Unit]
+Description=tmux server holding the roster's agent sessions
+
+[Service]
+# Written by `roster install`. Started on demand by `roster new` and `roster
+# resume`, never enabled. Its own unit, so agents never live in the cgroup of
+# what started them (the tray, a terminal, an SSH session). Stopping it ends
+# every tmux agent.
+ExecStart=%(tmux)s -L roster -f %(conf)s -D
+"""
+
+TRAY_SERVICE = """[Unit]
+Description=Agent roster tray menu
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+# Written by `roster install --tray`.
+ExecStart=%(bin)s/roster-tray
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=graphical-session.target
+"""
+
+
+def put(path, text, check):
+    """Write a file when its content differs; say what happened."""
+    try:
+        with open(path) as f:
+            if f.read() == text:
+                return "ok       " + short_path(path)
+    except OSError:
+        pass
+    if check:
+        return "differs  " + short_path(path)
+    write_atomic(path, text)
+    return "wrote    " + short_path(path)
+
+
+def merge_hooks(check):
+    """Add roster's hook entries to ~/.claude/settings.json, leaving everything else as it is."""
+    path = os.path.expanduser("~/.claude/settings.json")
+    try:
+        with open(path) as f:
+            data = json.load(f)
+    except FileNotFoundError:
+        data = {}
+    except ValueError:
+        raise Fail("%s is not valid JSON; not touching it" % path)
+    hooks = data.setdefault("hooks", {})
+    missing = []
+    for ev in HOOK_EVENTS:
+        entries = hooks.setdefault(ev, [])
+        if not any("roster hook %s" % ev in h.get("command", "")
+                   for en in entries for h in en.get("hooks", [])):
+            entries.append({"hooks": [{"type": "command", "timeout": 10,
+                                       "command": "%s/roster hook %s" % (HOME_BIN, ev)}]})
+            missing.append(ev)
+    if not missing:
+        return "ok       %s (hooks)" % short_path(path)
+    if check:
+        return "differs  %s (hooks missing: %s)" % (short_path(path), ", ".join(missing))
+    if os.path.exists(path) and not os.path.exists(path + ".before-roster"):
+        shutil.copy2(path, path + ".before-roster")
+    write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False) + "\n")
+    return "wrote    %s (hooks: %s)" % (short_path(path), ", ".join(missing))
+
+
+def cmd_install(args):
+    """Set this machine up for roster. Safe to run again; --check only reports."""
+    me = machine()
+    units = os.path.expanduser("~/.config/systemd/user")
+    with open(os.path.join(CODE, "share", "tmux.conf")) as f:
+        conf = f.read() + '\n# This machine, for the window titles.\nset -g @machine "%s"\n' % me
+    conf_path = os.path.join(CONFIG, "tmux.conf")
+    done = [put(conf_path, conf, args.check),
+            put(os.path.join(units, TMUX_UNIT),
+                TMUX_SERVICE % {"tmux": tool("tmux"), "conf": conf_path}, args.check)]
+    if not args.no_hooks:
+        done.append(merge_hooks(args.check))
+    if not args.no_skill:
+        with open(os.path.join(CODE, "share", "SKILL.md")) as f:
+            done.append(put(os.path.expanduser("~/.claude/skills/roster/SKILL.md"), f.read(), args.check))
+    if args.tray:
+        done.append(put(os.path.join(units, "roster-tray.service"),
+                        TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
+    print("\n".join(done))
+    if args.check:
+        return
+    run(["systemctl", "--user", "daemon-reload"])
+    if args.tray:
+        run(["systemctl", "--user", "enable", "roster-tray.service"])
+        run(["systemctl", "--user", "restart", "roster-tray.service"])
+    if tmux_running():
+        tmux("set-option", "-g", "@machine", me)  # the live server, for titles
+    print("roster %s on %s" % (VERSION, me))
+
+
 # --- Claude Code hooks -----------------------------------------------------
 
 
@@ -1649,6 +1786,16 @@ def main():
     s = sub.add_parser("cleanup", help="end and forget detached agents that never got a real name")
     s.add_argument("-n", "--dry-run", action="store_true", help="only say what would go")
     s.set_defaults(fn=cmd_cleanup)
+
+    s = sub.add_parser("install", help="set this machine up: tmux config, user units, hooks, skill")
+    s.add_argument("--check", action="store_true", help="only report what differs")
+    s.add_argument("--no-hooks", action="store_true", help="leave ~/.claude/settings.json alone")
+    s.add_argument("--no-skill", action="store_true", help="leave ~/.claude/skills/roster alone")
+    s.add_argument("--tray", action="store_true", help="also install and enable the tray")
+    s.set_defaults(fn=cmd_install)
+
+    s = sub.add_parser("version", help="print roster's version")
+    s.set_defaults(fn=lambda args: print("roster %s (protocol %d) on %s" % (VERSION, PROTOCOL, machine())))
 
     s = sub.add_parser("wake-later", help=argparse.SUPPRESS)
     s.add_argument("name")
