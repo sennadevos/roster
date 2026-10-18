@@ -1290,6 +1290,10 @@ def new_agent(cwd, name, role, prompt):
     scratch = not name
     if name:
         check_free(check_name(name))
+        old = load(name)
+        if old:
+            # Taking over a gone agent's name: its old session is no longer this name.
+            unindex_session(old.get("session_id"))
     else:
         name = fresh_id()
     session_id = str(uuid.uuid4())
