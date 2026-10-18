@@ -1,0 +1,73 @@
+#!/usr/bin/env python3
+"""A stand-in for the roster CLI, for tests/test_hub.py.
+
+It answers from files in $FAKE_ROSTER_DIR: rows.json is what `list --json`
+prints, and every call is appended to calls.jsonl (argv and stdin), so a test
+can see what the hub ran. `events` prints `change` whenever rows.json changes.
+"""
+
+import json
+import os
+import sys
+import time
+
+D = os.environ["FAKE_ROSTER_DIR"]
+
+
+def fail(reason):
+    print("roster: %s" % reason, file=sys.stderr)
+    sys.exit(1)
+
+
+def main():
+    argv = sys.argv[1:]
+    stdin = sys.stdin.read() if "-" in argv or "--prompt=-" in argv else None
+    with open(os.path.join(D, "calls.jsonl"), "a") as f:
+        f.write(json.dumps({"argv": argv, "stdin": stdin}) + "\n")
+    cmd = argv[0]
+    if cmd == "version":
+        print("roster 0.2.0 (protocol 1) on hub1")
+    elif cmd == "peer":
+        print("%-20s %-28s %s" % ("laptop", "me@laptop", "roster 0.2.0"))
+        print("%-20s %-28s %s" % ("idle-box", "me@idle-box", "@idle-box: connection refused"))
+    elif cmd == "list":
+        with open(os.path.join(D, "rows.json")) as f:
+            print(f.read())
+    elif cmd == "events":
+        print("ready", flush=True)
+        path = os.path.join(D, "rows.json")
+        last = os.stat(path).st_mtime_ns
+        while True:
+            time.sleep(0.05)
+            m = os.stat(path).st_mtime_ns
+            if m != last:
+                last = m
+                print("change", flush=True)
+    elif cmd == "screen":
+        print(json.dumps({"agent": argv[1], "status": "blocked", "text": "...",
+                          "dialog": {"title": "Do you want to run git push?",
+                                     "options": [{"key": "1", "label": "Yes"}, {"key": "2", "label": "No"}]}}))
+    elif cmd == "transcript":
+        print(json.dumps({"agent": argv[1], "session_id": "s", "next": 3, "messages": [
+            {"i": 1, "role": "user", "text": "do it"},
+            {"i": 2, "role": "assistant", "text": "All done: tests pass."}]}))
+    elif cmd == "prompt":
+        if argv[1].startswith("busy@"):
+            fail("%s has a dialog open; answer it with keys" % argv[1])
+    elif cmd == "keys":
+        pass
+    elif cmd == "new":
+        name = next((a.split("=", 1)[1] for a in argv if a.startswith("--name=")), "ab12cd34")
+        on = next(a.split("=", 1)[1] for a in argv if a.startswith("--on="))
+        if on == "hub1":
+            print("started %s in ~/src" % name)
+        else:
+            print("started %s@%s in /home/me" % (name, on))
+    elif cmd in ("resume", "kill"):
+        if argv[1].startswith("nobody@"):
+            fail("no agent named nobody on the roster")
+    else:
+        fail("unknown command %s" % cmd)
+
+
+main()
