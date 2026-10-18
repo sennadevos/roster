@@ -67,6 +67,15 @@ roster send 'rator-firmware/+' "message"   # a wildcard reaches every live match
 - Make a message self-contained: the recipient does not see your conversation. Name files by absolute path.
 - For roster members, use `roster send`, not the native SendMessage tool, so the mail lands in the inbox the roster tracks.
 
+## Other machines
+
+The roster can span several machines. Each one keeps its own agents, and `roster list` shows the others' under a heading such as `@srv-agents-01 · another machine`, each name marked `@srv-agents-01`. An agent there does not share your filesystem:
+
+- Paths, files, ports and running processes on another machine are not yours, and yours are not theirs. Send the content itself, not a path. Name a repo by its remote (`github.com/...`), not by a local checkout.
+- Address it as `name@machine` when a bare name could be ambiguous; `roster send` finds a unique bare name on any machine.
+- Mail from another machine says so in its header, with the address to reply to.
+- When that machine is unreachable, `roster list` shows its last known state and `roster send` queues the message until it answers.
+
 ## Receiving
 
 Mail arrives by itself, inserted into your context under a `[roster]` header. A message sent with a wildcard shows its filter, e.g. `to rator-firmware/+`. `roster inbox` shows anything new by hand, and `--peek` leaves it unread.
@@ -86,6 +95,9 @@ roster kill <name>      # end a tmux agent's session
 roster resume <name>    # bring a gone agent back (claude --resume), e.g. after a reboot
 roster move <name|pane> # move an idle herdr Claude agent into a roster tmux session
 roster cleanup [-n]     # end and forget detached agents still under a placeholder name
+roster new --on <machine> [dir]   # start an agent on another machine; attach shows it here
+roster peer add user@host         # install roster there and link the two machines
+roster peer list|update|remove
 ```
 
 Two front ends sit on top of the CLI: `roster-tray`, the tray menu, and `roster-pick`, a fuzzel menu of live agents for a keybinding.

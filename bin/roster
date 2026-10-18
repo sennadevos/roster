@@ -101,6 +101,8 @@ def _hook_fast_path():
 _hook_fast_path()
 
 import argparse  # noqa: E402 -- after the fast path on purpose
+import concurrent.futures  # noqa: E402
+import getpass  # noqa: E402
 import glob  # noqa: E402
 import json  # noqa: E402
 import pwd  # noqa: E402
@@ -135,6 +137,12 @@ CONFIG = os.path.join(
 CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PREFIX = os.path.expanduser("~/.local/share/roster")
 HOME_BIN = os.path.expanduser("~/.local/bin")
+# Other machines: one record per peer, the messages waiting for one that was
+# unreachable, the last list each peer gave, and the key peers know us by.
+PEERS = os.path.join(STATE, "peers")
+OUTBOX = os.path.join(STATE, "outbox")
+CACHE = os.path.join(os.environ.get("XDG_CACHE_HOME") or os.path.expanduser("~/.cache"), "roster")
+KEY = os.path.expanduser("~/.ssh/roster_ed25519")
 
 # Each level of a name is lowercase letters, digits, `_` and `-`. A level may
 # start with a digit, so the random ids `roster new` hands out are names too.
@@ -183,6 +191,10 @@ ASKING = ("permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "
 
 class Fail(Exception):
     pass
+
+
+class Unreachable(Fail):
+    """A peer machine did not answer (SSH failed), as opposed to answering no."""
 
 
 # --- storage ---------------------------------------------------------------
@@ -269,7 +281,7 @@ def unread(name):
         return []
 
 
-def deliver(sender, recipient, body, in_reply_to=None, to_filter=None, msg_id=None):
+def deliver(sender, recipient, body, in_reply_to=None, to_filter=None, msg_id=None, from_machine=None):
     ensure_maildir(recipient)
     msg = {
         "id": msg_id or uuid.uuid4().hex[:12],
@@ -278,7 +290,8 @@ def deliver(sender, recipient, body, in_reply_to=None, to_filter=None, msg_id=No
         "sent_at": now(),
         "body": body,
     }
-    for key, val in (("in_reply_to", in_reply_to), ("to_filter", to_filter)):
+    for key, val in (("in_reply_to", in_reply_to), ("to_filter", to_filter),
+                     ("from_machine", from_machine)):
         if val:
             msg[key] = val
     # Maildir-style: time-prefixed so a listing sorts in arrival order, written
@@ -342,7 +355,13 @@ def name_matches(flt, name):
 def render(msgs):
     parts = []
     for m in msgs:
-        head = "--- from %s · %s · id %s" % (m.get("from"), m.get("sent_at"), m.get("id"))
+        if m.get("from_machine"):
+            # Say it plainly: the sender cannot see this machine's files.
+            head = "--- from %s@%s, on another machine (its paths, files and ports are not yours; " \
+                   "reply with `roster send %s@%s`) · %s · id %s" % (
+                       m["from"], m["from_machine"], m["from"], m["from_machine"], m.get("sent_at"), m.get("id"))
+        else:
+            head = "--- from %s · %s · id %s" % (m.get("from"), m.get("sent_at"), m.get("id"))
         if m.get("to_filter"):
             head += " · to %s" % m["to_filter"]
         if m.get("in_reply_to"):
@@ -626,11 +645,14 @@ def user_is_on(e, a):
         return bool(a.get("focused"))
     if not a.get("attached"):
         return False
+    # With focus-events on, tmux marks the client whose terminal has focus. That
+    # holds for a window on this machine and for one attached over SSH from
+    # another, where this machine's compositor knows nothing.
     try:
-        w = niri_json("focused-window")
+        flags = tmux("list-clients", "-t", e["pane_id"], "-F", "#{client_flags}")
     except Fail:
         return True  # attached and we cannot tell: never inject
-    return bool(w) and w.get("title") == title(e["name"])
+    return any("focused" in line.split(",") for line in flags.splitlines())
 
 
 def submit(e, text):
@@ -762,6 +784,8 @@ def cmd_join(args):
     old = load(name)
     if old and old.get("status") not in ENDED and old.get("session_id") != session_id:
         raise Fail("%s is taken by a live agent in pane %s" % (name, old.get("pane_id")))
+    if not old:
+        check_free(name)
     if old and old.get("session_id") != session_id:
         unindex_session(old.get("session_id"))
 
@@ -810,6 +834,7 @@ def cmd_rename(args):
     other = load(new)
     if other and other.get("status") not in ENDED:
         raise Fail("%s is taken by a live agent in pane %s" % (new, other.get("pane_id")))
+    check_free(new, local=False)
     if other:
         # A gone or left entry under that name: take its unread mail along, the
         # same as `join` taking over a gone name.
@@ -853,19 +878,32 @@ def cmd_leave(args):
     print("left the roster; %s's inbox is kept" % e["name"])
 
 
-def list_rows(args):
-    """The entries to show, in tree order, and the live agents behind them."""
+def list_rows(args, remote=True):
+    """The entries to show and the live local agents behind them.
+
+    Local rows first, then each peer's, every row tagged with `machine` and
+    `local`. A peer that does not answer contributes its last known rows,
+    marked `stale`. Tree order within a machine: a lead, then the agents under it.
+    """
     matched = reconcile()
+    me_ = machine()
     rows = [e for e in all_entries() if args.all or e.get("status") not in ENDED]
+    for e in rows:
+        e["unread"] = len(unread(e["name"]))
+        e.update(machine=me_, local=True)
+        if backend(e) == "tmux" and e["name"] in matched:
+            e["attached"] = matched[e["name"]]["attached"] > 0
+    rows.sort(key=lambda e: e["name"].split("/"))
+    if remote:
+        for m, got in sorted(peer_lists(args.all).items()):
+            for r in got["rows"]:
+                r.update(machine=m, local=False)
+                if got["error"]:
+                    r["stale"] = got["error"]
+            rows.extend(sorted(got["rows"], key=lambda e: e["name"].split("/")))
     if args.filter:
         flt = check_name(args.filter, wildcards=True)
         rows = [e for e in rows if name_matches(flt, e["name"])]
-    for e in rows:
-        e["unread"] = len(unread(e["name"]))
-        if backend(e) == "tmux" and e["name"] in matched:
-            e["attached"] = matched[e["name"]]["attached"] > 0
-    # Tree order: a lead first, the agents under it right after.
-    rows.sort(key=lambda e: e["name"].split("/"))
     return rows, matched
 
 
@@ -903,16 +941,29 @@ def render_list(rows, color=False, width=None):
             pass
     mine = my_pane()
     lines = []
+    group, after_header = machine(), False
     for e in rows:
+        if e.get("machine", group) != group:
+            group = e["machine"]
+            if lines:
+                lines.append("")
+            note = "another machine: its paths, files and ports are not this one's"
+            if e.get("stale"):
+                note += "; unreachable (%s), last known state" % e["stale"]
+            lines.append(paint("1;36", "@%s" % group) + paint("2", " · " + note))
+            after_header = True
         depth = e["name"].count("/")
-        if depth == 0 and lines:
+        if depth == 0 and lines and not after_header:
             lines.append("")
+        after_header = False
         pad = "  " * depth
         status = e.get("status") or "unknown"
         ended = status in ENDED
         glyph, code = LOOK.get(status, LOOK["unknown"])
         head = pad + paint(code, glyph) + " " + paint("1", e["name"])
-        if (backend(e), e.get("pane_id")) == mine and not ended:
+        if not e.get("local", True):
+            head += paint("36", "@" + e["machine"])
+        elif (backend(e), e.get("pane_id")) == mine and not ended:
             head += paint("36", " (you)")
         head += "  " + paint(code, "%s %s" % (status, ago(e.get("ended_at") if ended else e.get("status_at"))))
         n = e.get("unread", 0)
@@ -995,6 +1046,7 @@ def cmd_send(args):
     sender = me(matched)
     if not sender:
         raise Fail("not on the roster; join first so the recipient can reply")
+    remote = {}  # machine -> [names]
     if is_filter(args.to):
         flt = check_name(args.to, wildcards=True)
         targets = [
@@ -1002,16 +1054,25 @@ def cmd_send(args):
             if e.get("status") not in ENDED and e["name"] != sender["name"]
             and name_matches(flt, e["name"])
         ]
-        if not targets:
+        for m, got in peer_lists(False).items():
+            if got["error"]:
+                print("not sent to @%s: unreachable (%s)" % (m, got["error"]))
+                continue
+            names = [r["name"] for r in got["rows"] if name_matches(flt, r["name"])]
+            if names:
+                remote[m] = names
+        if not targets and not remote:
             raise Fail("no live agent other than you matches %s" % flt)
     else:
         flt = None
-        if args.to == sender["name"]:
+        name, mach = split_target(args.to)
+        if name == sender["name"] and mach in (None, machine()):
             raise Fail("cannot send to yourself")
-        target = load(args.to)
-        if not target:
-            raise Fail("no agent named %s on the roster" % args.to)
-        targets = [target]
+        where = locate(name, mach)
+        if where[0] == "local":
+            targets = [where[1]]
+        else:
+            targets, remote = [], {where[1]: [name]}
     body = sys.stdin.read() if args.message in (None, "-") else args.message
     if not body.strip():
         raise Fail("empty message")
@@ -1022,6 +1083,11 @@ def cmd_send(args):
         to = target["name"]
         deliver(sender["name"], to, body, args.reply_to, to_filter=flt, msg_id=msg_id)
         print("sent %s to %s: %s" % (msg_id, to, wake(sender, target, matched.get(to))))
+    for m, names in sorted(remote.items()):
+        payload = {"from": sender["name"], "to": names, "body": body, "in_reply_to": args.reply_to,
+                   "to_filter": flt, "id": msg_id}
+        for line in send_remote(m, payload):
+            print(line)
 
 
 def wake(sender, target, a):
@@ -1159,24 +1225,55 @@ def cmd_attach(args):
         names = sorted((n for n in matched if name_matches(flt, n)), key=lambda n: n.split("/"))
         if not names:
             raise Fail("no live agent matches %s" % flt)
-    else:
-        names = [check_name(args.target)]
-    for name in names:
-        e, a = live_entry(name, matched)
-        print(attach(e, a))
+        for name in names:
+            e, a = live_entry(name, matched)
+            print(attach(e, a))
+        return
+    name, mach = split_target(args.target)
+    where = locate(check_name(name), mach)
+    if where[0] == "remote":
+        print(attach_remote(where[1], where[2]))
+        return
+    e, a = where[1], matched.get(name)
+    print(attach(e, a))
 
 
 def cmd_new(args):
-    cwd = os.path.realpath(os.path.expanduser(args.cwd or os.getcwd()))
+    prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
+    if args.on and args.on != machine():
+        if args.name:
+            check_free(check_name(args.name))
+        got = rpc(args.on, "new", data={"cwd": args.cwd, "name": args.name, "role": args.role,
+                                        "prompt": prompt})
+        print("started %s@%s in %s" % (got["name"], args.on, got["cwd"]))
+        if args.no_attach:
+            return
+        if not args.window and sys.stdin.isatty() and sys.stdout.isatty():
+            sys.stdout.flush()
+            argv = ssh_argv(peer(args.on), "attach", got["name"], tty=True)
+            os.execv(argv[0], argv)
+        print(attach_remote(args.on, {"name": got["name"], "attached": False}))
+        return
+    entry = new_agent(args.cwd, args.name, args.role, prompt)
+    print("started %s in %s" % (entry["name"], short_path(entry["cwd"])))
+    if args.no_attach:
+        return
+    pane = entry["pane_id"]
+    if not args.window and sys.stdin.isatty() and sys.stdout.isatty():
+        attach_here(pane)
+    print(attach(entry, {"pane_id": pane, "roster": entry["name"], "attached": 0}))
+
+
+def new_agent(cwd, name, role, prompt):
+    """Start a Claude agent in a roster tmux session on this machine; return its entry."""
+    cwd = os.path.realpath(os.path.expanduser(cwd or os.getcwd()))
     if not os.path.isdir(cwd):
         raise Fail("no such directory: %s" % cwd)
-    if args.name:
-        name = check_name(args.name)
-        if load(name):
-            raise Fail("%s is already on the roster" % name)
+    scratch = not name
+    if name:
+        check_free(check_name(name))
     else:
         name = fresh_id()
-    prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
     session_id = str(uuid.uuid4())
     claude_args = ["--session-id", session_id, "--name", name]
     if prompt and prompt.strip():
@@ -1185,7 +1282,7 @@ def cmd_new(args):
     ensure_maildir(name)
     entry = {
         "name": name,
-        "role": args.role or SCRATCH_ROLE,
+        "role": role or SCRATCH_ROLE,
         "backend": "tmux",
         "harness": "claude",
         "session_id": session_id,
@@ -1199,16 +1296,11 @@ def cmd_new(args):
         "ended_at": None,
         "end_reason": None,
     }
-    if not args.name:
+    if scratch:
         entry["scratch"] = True
     save(entry)
     index_session(session_id, name)
-    print("started %s in %s" % (name, short_path(cwd)))
-    if args.no_attach:
-        return
-    if not args.window and sys.stdin.isatty() and sys.stdout.isatty():
-        attach_here(pane)
-    print(attach(entry, {"pane_id": pane, "roster": name, "attached": 0}))
+    return entry
 
 
 def attach_here(pane):
@@ -1220,8 +1312,14 @@ def attach_here(pane):
 
 
 def cmd_kill(args):
+    name, mach = split_target(args.name)
+    where = locate(check_name(name), mach)
+    if where[0] == "remote":
+        rpc(where[1], "kill", name)
+        print("killed %s@%s" % (name, where[1]))
+        return
     matched = reconcile()
-    e, a = live_entry(check_name(args.name), matched)
+    e, a = live_entry(name, matched)
     if backend(e) != "tmux":
         raise Fail("%s runs in herdr; end it there" % e["name"])
     if a is None:
@@ -1238,8 +1336,15 @@ def cmd_kill(args):
 
 
 def cmd_resume(args):
+    name, mach = split_target(args.name)
+    name = check_name(name)
+    if mach and mach != machine():
+        got = rpc(mach, "resume", name)
+        print("resumed %s@%s in %s" % (name, mach, got["cwd"]))
+        if not args.no_attach:
+            print(attach_remote(mach, {"name": name, "attached": False}))
+        return
     reconcile()
-    name = check_name(args.name)
     e = load(name)
     if not e:
         raise Fail("no agent named %s on the roster" % name)
@@ -1493,6 +1598,490 @@ def cmd_move(args):
             print("%s: not moved: %s" % (target, exc))
     if failed:
         raise Fail("%d of %d not moved" % (failed, len(targets)))
+
+
+# --- other machines --------------------------------------------------------
+#
+# Each machine keeps its own roster. A peer is another machine running roster,
+# reached over SSH with a key of its own (~/.ssh/roster_ed25519). On the far
+# side that key is pinned in authorized_keys to `roster rpc --from <machine>`,
+# so a peer can list, deliver mail, attach and start or end agents, and never
+# gets a shell. `roster peer add user@host` sets this up in both directions.
+
+
+def peers():
+    """{machine: record} for every peer of this machine."""
+    out = {}
+    try:
+        names = sorted(os.listdir(PEERS))
+    except OSError:
+        return out
+    for n in names:
+        try:
+            with open(os.path.join(PEERS, n)) as f:
+                rec = json.load(f)
+            out[rec["machine"]] = rec
+        except (OSError, ValueError, KeyError):
+            continue
+    return out
+
+
+def peer(mach):
+    rec = peers().get(mach)
+    if not rec:
+        raise Fail("no peer machine %s (roster peer list)" % mach)
+    return rec
+
+
+def ssh_argv(rec, *args, tty=False):
+    """ssh to a peer as roster: its own key, no prompts, one shared connection."""
+    os.makedirs(CACHE, exist_ok=True)
+    return [tool("ssh"), "-i", KEY, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
+            "-o", "ConnectTimeout=4", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
+            "-o", "ControlMaster=auto", "-o", "ControlPath=%s/ssh-%%C" % CACHE, "-o", "ControlPersist=10m",
+            "-t" if tty else "-T", rec["ssh"], shlex.join([str(PROTOCOL)] + [str(a) for a in args])]
+
+
+def rpc(mach, *args, data=None, timeout=20):
+    """Run `roster rpc` on a peer and return its JSON answer."""
+    rec = peer(mach)
+    try:
+        proc = subprocess.run(ssh_argv(rec, *args), input=json.dumps(data) if data is not None else "",
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise Unreachable("@%s did not answer within %ds" % (mach, timeout))
+    except OSError as exc:
+        raise Fail("ssh: %s" % exc)
+    if proc.returncode == 255:
+        raise Unreachable("@%s: %s" % (mach, (proc.stderr.strip().splitlines() or ["ssh failed"])[-1]))
+    try:
+        out = json.loads(proc.stdout)
+    except ValueError:
+        raise Fail("@%s: %s" % (mach, (proc.stderr or proc.stdout).strip() or "no answer"))
+    if isinstance(out, dict) and out.get("error"):
+        raise Fail("@%s: %s" % (mach, out["error"]))
+    return out
+
+
+def peer_lists(all_=False):
+    """{machine: {"rows": [...], "error": None or why}} from every peer, asked in parallel.
+
+    A peer that does not answer gives the rows it gave last time, from the
+    cache, with the error set. Mail queued for a peer goes out once it answers.
+    """
+    recs = peers()
+    if not recs:
+        return {}
+
+    def ask(m):
+        try:
+            got = rpc(m, "list", "--all" if all_ else "--live", timeout=8)
+            rows = got["rows"]
+            write_atomic(os.path.join(CACHE, "peers", "%s%s.json" % (m, ".all" if all_ else "")),
+                         json.dumps({"fetched_at": now(), "rows": rows}))
+            try:
+                flush_outbox(m)
+            except Fail:
+                pass
+            return m, {"rows": rows, "error": None}
+        except Fail as exc:
+            try:
+                with open(os.path.join(CACHE, "peers", "%s%s.json" % (m, ".all" if all_ else ""))) as f:
+                    cached = json.load(f)
+                why = "%s; as of %s ago" % (exc, ago(cached["fetched_at"]))
+                return m, {"rows": cached["rows"], "error": why}
+            except (OSError, ValueError, KeyError):
+                return m, {"rows": [], "error": str(exc)}
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(recs)) as pool:
+        return dict(pool.map(ask, recs))
+
+
+def split_target(target):
+    """`name@machine` -> (name, machine); a bare name -> (name, None)."""
+    if "@" in target:
+        name, mach = target.rsplit("@", 1)
+        return name, mach or None
+    return target, None
+
+
+def locate(name, mach=None):
+    """Where an agent lives: ("local", entry) or ("remote", machine, row)."""
+    if mach in (None, machine()):
+        e = load(name)
+        if e and (mach or e.get("status") not in ENDED):
+            return ("local", e)
+        if mach:
+            raise Fail("no agent named %s on this machine" % name)
+    hits = []
+    for m, got in peer_lists(True).items():
+        if mach in (None, m):
+            hits += [(m, r) for r in got["rows"] if r["name"] == name]
+    live = [h for h in hits if h[1].get("status") not in ENDED]
+    hits = live or hits
+    if not hits:
+        e = load(name)
+        if e:
+            return ("local", e)  # gone here, and nowhere else
+        raise Fail("no agent named %s on the roster" % (name if not mach else "%s@%s" % (name, mach)))
+    if len(hits) > 1:
+        raise Fail("%s is on %s; say which, as %s@<machine>" % (name, ", ".join(m for m, _ in hits), name))
+    return ("remote", hits[0][0], hits[0][1])
+
+
+def check_free(name, local=True):
+    """Fail when a live agent on any reachable machine already has this name."""
+    if local:
+        e = load(name)
+        if e and e.get("status") not in ENDED:
+            raise Fail("%s is already on the roster" % name)
+    for m, got in peer_lists(False).items():
+        if not got["error"] and any(r["name"] == name for r in got["rows"]):
+            raise Fail("%s is taken by a live agent on %s" % (name, m))
+
+
+def send_remote(mach, payload):
+    """Deliver to agents on a peer; queue it in the outbox when the peer is unreachable."""
+    try:
+        flush_outbox(mach)
+        got = rpc(mach, "deliver", data=payload)
+        return ["sent %s to %s@%s: %s" % (payload["id"], r["to"], mach, r["result"]) for r in got["results"]]
+    except Unreachable as exc:
+        write_atomic(os.path.join(OUTBOX, mach, "%d.%s.json" % (time.time_ns(), payload["id"])),
+                     json.dumps(payload))
+        return ["queued %s for %s@%s: %s; it goes out when that machine answers"
+                % (payload["id"], n, mach, exc) for n in payload["to"]]
+
+
+def flush_outbox(mach):
+    """Send what waits for a peer, oldest first; stop at the first sign it is unreachable."""
+    box = os.path.join(OUTBOX, mach)
+    try:
+        files = sorted(f for f in os.listdir(box) if f.endswith(".json"))
+    except OSError:
+        return
+    for fname in files:
+        path = os.path.join(box, fname)
+        try:
+            with open(path) as f:
+                payload = json.load(f)
+            rpc(mach, "deliver", data=payload)
+        except Unreachable:
+            return
+        except (Fail, OSError, ValueError):
+            # It answered no (say the agent is gone for good): keep it aside.
+            os.makedirs(os.path.join(box, "failed"), exist_ok=True)
+            os.replace(path, os.path.join(box, "failed", fname))
+            continue
+        os.remove(path)
+
+
+def attach_remote(mach, row):
+    """Show an agent on a peer in a window here, over SSH. Never attached twice."""
+    name = row["name"]
+    w = agent_window(name, mach)
+    if w:
+        niri("action", "focus-window", "--id", str(w["id"]))
+        return "focused %s@%s" % (name, mach)
+    if row.get("attached"):
+        raise Fail("%s@%s is already attached somewhere" % (name, mach))
+    niri("action", "spawn", "--", *terminal(name, mach), *ssh_argv(peer(mach), "attach", name, tty=True))
+    return "opened %s@%s" % (name, mach)
+
+
+# --- the far side of a peer link ---------------------------------------------
+
+
+def cmd_rpc(args):
+    """What a peer may do here: run as the forced command of its key.
+
+    The peer's request is SSH_ORIGINAL_COMMAND: the protocol version, a verb
+    and its arguments, with a JSON body on stdin where one is needed. The
+    answer is JSON on stdout, except `attach` (a terminal) and `events` (lines).
+    """
+    raw = os.environ.get("SSH_ORIGINAL_COMMAND")
+    argv = shlex.split(raw) if raw is not None else args.request
+    try:
+        if not argv or argv[0] != str(PROTOCOL):
+            raise Fail("protocol mismatch: %s speaks %s, the caller %s; update roster on both"
+                       % (machine(), PROTOCOL, argv[0] if argv else "nothing"))
+        verb, rest = (argv[1:2] or [""])[0], argv[2:]
+        caller = args.peer or "?"
+        if verb == "version":
+            out = {"version": VERSION, "protocol": PROTOCOL, "machine": machine()}
+        elif verb == "list":
+            rows, _ = list_rows(argparse.Namespace(all="--all" in rest, filter=None), remote=False)
+            out = {"machine": machine(), "rows": rows}
+        elif verb == "deliver":
+            p = json.load(sys.stdin)
+            matched = reconcile()
+            sender = {"name": "%s@%s" % (p["from"], caller)}
+            results = []
+            for to in p["to"]:
+                target = load(to)
+                if not target:
+                    results.append({"to": to, "result": "no agent named %s here" % to})
+                    continue
+                deliver(p["from"], to, p["body"], p.get("in_reply_to"), to_filter=p.get("to_filter"),
+                        msg_id=p.get("id"), from_machine=caller)
+                results.append({"to": to, "result": wake(sender, target, matched.get(to))})
+            out = {"results": results}
+        elif verb == "attach":
+            return rpc_attach(check_name(rest[0]))
+        elif verb == "new":
+            p = json.load(sys.stdin)
+            e = new_agent(p.get("cwd") or "~", p.get("name"), p.get("role"), p.get("prompt"))
+            out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "resume":
+            reconcile()
+            e = load(check_name(rest[0]))
+            if not e or e.get("status") != "gone":
+                raise Fail("%s is %s here" % (rest[0], e.get("status") if e else "unknown"))
+            resume_in_tmux(e)
+            out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "kill":
+            cmd_kill(argparse.Namespace(name=check_name(rest[0])))
+            out = {"name": rest[0]}
+        elif verb == "events":
+            return cmd_events(argparse.Namespace(machine=None, all=False))
+        else:
+            raise Fail("unknown request %r" % verb)
+    except Fail as exc:
+        print(json.dumps({"error": str(exc)}))
+        return
+    except (ValueError, KeyError, IndexError) as exc:
+        print(json.dumps({"error": "bad request: %s" % exc}))
+        return
+    print(json.dumps(out))
+
+
+def has_terminfo(term):
+    dirs = [os.path.expanduser("~/.terminfo"), "/etc/terminfo", "/usr/share/terminfo", "/lib/terminfo"]
+    return any(os.path.exists(os.path.join(d, term[:1], term)) or
+               os.path.exists(os.path.join(d, "%02x" % ord(term[:1]), term)) for d in dirs if term)
+
+
+def rpc_attach(name):
+    """Become the tmux client for one of this machine's agents, over the peer's SSH terminal."""
+    matched = reconcile()
+    e, a = load(name), matched.get(name)
+    if not e or backend(e) != "tmux" or a is None:
+        sys.exit("roster: no live tmux agent %s on %s" % (name, machine()))
+    if a["attached"]:
+        sys.exit("roster: %s is already attached" % name)
+    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    if not has_terminfo(env.get("TERM", "")):
+        env["TERM"] = "xterm-256color"  # this machine may not know the far terminal (xterm-kitty)
+    exe = tool("tmux")
+    os.execve(exe, [exe, "-L", TMUX_SOCKET, "attach-session", "-t", e["pane_id"]], env)
+
+
+# --- events: a line whenever the roster here changes -------------------------
+
+
+def cmd_events(args):
+    """Print `change` whenever something under the state directory changes (inotify).
+
+    For the tray and for peers; `--machine M` streams a peer's instead, and
+    `--all` this machine's and every peer's in one stream. The first line is
+    `ready`.
+    """
+    if args.machine and args.machine != machine():
+        argv = ssh_argv(peer(args.machine), "events")
+        os.execv(argv[0], argv)
+    import ctypes
+    import select
+    import threading
+    lock = threading.Lock()
+
+    def emit(line):
+        with lock:
+            sys.stdout.write(line + "\n")
+            sys.stdout.flush()
+
+    def follow(m):
+        """A peer's stream, reconnected when it drops; a drop is a change too (it went unreachable)."""
+        while True:
+            try:
+                proc = subprocess.Popen(ssh_argv(peer(m), "events"), stdin=subprocess.DEVNULL,
+                                        stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, text=True)
+                for line in proc.stdout:
+                    if line.strip() in ("ready", "change"):
+                        emit("change")
+                proc.wait()
+            except (Fail, OSError):
+                pass
+            emit("change")
+            time.sleep(15)
+
+    if getattr(args, "all", False):
+        for m in peers():
+            threading.Thread(target=follow, args=(m,), daemon=True).start()
+    libc = ctypes.CDLL("libc.so.6", use_errno=True)
+    fd = libc.inotify_init1(0o4000 | 0o2000000)  # IN_NONBLOCK | IN_CLOEXEC
+    if fd < 0:
+        raise Fail("inotify_init1 failed")
+    mask = 0x8 | 0x40 | 0x80 | 0x100 | 0x200 | 0x400  # close_write, moved, create, delete(_self)
+
+    def rewatch():
+        os.makedirs(AGENTS, exist_ok=True)
+        for d in [STATE, AGENTS] + [os.path.join(AGENTS, n) for n in os.listdir(AGENTS)]:
+            for path in (d, os.path.join(d, "inbox"), os.path.join(d, "inbox", "new")):
+                if os.path.isdir(path):
+                    libc.inotify_add_watch(fd, os.fsencode(path), mask)
+
+    rewatch()
+    emit("ready")
+    while True:
+        r, _, _ = select.select([fd], [], [], 60)
+        if not r:
+            emit("tick")  # keeps an SSH stream honest about being alive
+            continue
+        time.sleep(0.25)  # a send or a status write is a burst of renames
+        try:
+            while os.read(fd, 65536):
+                pass
+        except BlockingIOError:
+            pass
+        rewatch()
+        emit("change")
+
+
+# --- setting up a peer -------------------------------------------------------
+
+
+def ensure_key():
+    if not os.path.exists(KEY):
+        os.makedirs(os.path.dirname(KEY), mode=0o700, exist_ok=True)
+        proc = run(["ssh-keygen", "-q", "-t", "ed25519", "-N", "", "-C", "roster@" + machine(), "-f", KEY])
+        if proc.returncode != 0:
+            raise Fail("ssh-keygen: %s" % proc.stderr.strip())
+    with open(KEY + ".pub") as f:
+        return f.read().strip()
+
+
+def authorize(pubkey, from_machine):
+    """Let a peer's roster key in, pinned to `roster rpc --from <machine>`; replaces an older line."""
+    path = os.path.expanduser("~/.ssh/authorized_keys")
+    blob = pubkey.split()[1]
+    try:
+        with open(path) as f:
+            lines = [l for l in f.read().splitlines() if blob not in l]
+    except FileNotFoundError:
+        lines = []
+    opts = 'command="%s/roster rpc --from %s",no-port-forwarding,no-X11-forwarding,no-agent-forwarding,no-user-rc' % (
+        HOME_BIN, from_machine)
+    lines.append("%s %s" % (opts, " ".join(pubkey.split()[:2] + ["roster@" + from_machine])))
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    write_atomic(path, "\n".join(lines) + "\n")
+    os.chmod(path, 0o600)
+
+
+def record_peer(mach, ssh_target):
+    if mach == machine():
+        raise Fail("a peer cannot have this machine's own name (%s)" % mach)
+    write_atomic(os.path.join(PEERS, mach + ".json"),
+                 json.dumps({"machine": mach, "ssh": ssh_target, "added_at": now()}, indent=2) + "\n")
+
+
+def push_install(target, extra=()):
+    """Install this version of roster on another machine, over the user's own SSH."""
+    with tempfile.TemporaryDirectory() as tmp:
+        tarball = os.path.join(tmp, "roster.tgz")
+        files = [f for f in ("bin", "share", "install.sh") if os.path.exists(os.path.join(CODE, f))]
+        proc = run(["tar", "-czf", tarball, "-C", CODE] + files)
+        if proc.returncode != 0:
+            raise Fail("tar: %s" % proc.stderr.strip())
+        script = ('set -e; d=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; tar -xz -C "$d"; '
+                  'sh "$d/install.sh" --from "$d" %s' % " ".join(shlex.quote(a) for a in extra))
+        with open(tarball, "rb") as f:
+            done = subprocess.run([tool("ssh"), target, script], stdin=f)
+    if done.returncode != 0:
+        raise Fail("installing roster on %s failed" % target)
+
+
+def cmd_peer(args):
+    args.machine = args.target
+    if args.action in ("add", "update", "remove") and not args.target:
+        raise Fail("peer %s needs a %s" % (args.action, "user@host" if args.action == "add" else "machine"))
+    if args.action == "add":
+        return peer_add(args)
+    if args.action == "accept":
+        return peer_accept(args)
+    if args.action == "list":
+        recs = peers()
+        if not recs:
+            print("no peers; add one with `roster peer add user@host`")
+        for m, rec in sorted(recs.items()):
+            try:
+                v = rpc(m, "version", timeout=8)
+                state = "roster %s" % v["version"]
+            except Fail as exc:
+                state = str(exc)
+            print("%-20s %-28s %s" % (m, rec["ssh"], state))
+        return
+    if args.action == "update":
+        rec = peer(args.machine)
+        push_install(rec["ssh"])
+        print("updated roster on %s" % args.machine)
+        return
+    if args.action == "remove":
+        rec = peer(args.machine)
+        os.remove(os.path.join(PEERS, args.machine + ".json"))
+        path = os.path.expanduser("~/.ssh/authorized_keys")
+        try:
+            with open(path) as f:
+                lines = f.read().splitlines()
+            keep = [l for l in lines if "roster rpc --from %s\"" % args.machine not in l]
+            if keep != lines:
+                write_atomic(path, "\n".join(keep) + "\n")
+                os.chmod(path, 0o600)
+        except FileNotFoundError:
+            pass
+        print("removed %s (%s); its own record of this machine stays until removed there" % (args.machine, rec["ssh"]))
+
+
+def peer_add(args):
+    """Install roster on another machine and link the two both ways.
+
+    Uses the user's own SSH once, to install and to exchange the roster keys;
+    after that, roster only uses its own pinned keys.
+    """
+    target = args.target
+    mine = ensure_key()
+    if not args.no_install:
+        print("installing roster on %s ..." % target)
+        push_install(target)
+    script = "%s/roster peer accept --from %s --user %s --key %s" % (
+        "$HOME/.local/bin", shlex.quote(machine()), shlex.quote(getpass.getuser()), shlex.quote(mine))
+    proc = subprocess.run([tool("ssh"), target, script], capture_output=True, text=True)
+    try:
+        theirs = json.loads(proc.stdout.strip().splitlines()[-1])
+    except (ValueError, IndexError):
+        raise Fail("linking failed on %s: %s" % (target, (proc.stderr or proc.stdout).strip()))
+    if theirs.get("error"):
+        raise Fail("%s: %s" % (target, theirs["error"]))
+    authorize(theirs["key"], theirs["machine"])
+    record_peer(theirs["machine"], target)
+    v = rpc(theirs["machine"], "version")
+    print("linked %s (roster %s) <-> %s; it reaches this machine as %s"
+          % (theirs["machine"], v["version"], machine(), theirs["back"]))
+    if v["protocol"] != PROTOCOL:
+        print("warning: it speaks protocol %s, this machine %s" % (v["protocol"], PROTOCOL))
+
+
+def peer_accept(args):
+    """The far half of `peer add`, run over the user's SSH: let the caller in, record it."""
+    try:
+        conn = os.environ.get("SSH_CONNECTION", "").split()
+        if not conn:
+            raise Fail("peer accept runs over SSH, from `roster peer add`")
+        back = "%s@%s" % (args.user, conn[0])
+        authorize(args.key, args.peer)
+        record_peer(args.peer, back)
+        print(json.dumps({"machine": machine(), "key": ensure_key(), "back": back}))
+    except Fail as exc:
+        print(json.dumps({"error": str(exc)}))
 
 
 # --- install ---------------------------------------------------------------
@@ -1757,7 +2346,8 @@ def main():
     s.set_defaults(fn=cmd_inbox)
 
     s = sub.add_parser("new", help="start a Claude agent in its own tmux session; attach here, or in a new window")
-    s.add_argument("cwd", nargs="?", help="working directory (default: here)")
+    s.add_argument("cwd", nargs="?", help="working directory (default: here, or home on another machine)")
+    s.add_argument("--on", metavar="MACHINE", help="start it on a peer machine")
     s.add_argument("--name", help="roster name (default: a random placeholder the agent renames)")
     s.add_argument("--role", help="its one-line role on the roster")
     s.add_argument("--prompt", help="first prompt, as if typed by the user; - reads stdin")
@@ -1786,6 +2376,25 @@ def main():
     s = sub.add_parser("cleanup", help="end and forget detached agents that never got a real name")
     s.add_argument("-n", "--dry-run", action="store_true", help="only say what would go")
     s.set_defaults(fn=cmd_cleanup)
+
+    s = sub.add_parser("peer", help="other machines: add, list, update, remove")
+    s.add_argument("action", choices=["add", "list", "update", "remove", "accept"])
+    s.add_argument("target", nargs="?", help="add: user@host; update/remove: machine")
+    s.add_argument("--no-install", action="store_true", help="add: roster is already installed there")
+    s.add_argument("--from", dest="peer", help=argparse.SUPPRESS)
+    s.add_argument("--user", help=argparse.SUPPRESS)
+    s.add_argument("--key", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_peer)
+
+    s = sub.add_parser("events", help="print a line whenever the roster changes (for the tray)")
+    s.add_argument("--machine", help="a peer's roster instead of this one")
+    s.add_argument("--all", action="store_true", help="this machine and every peer, in one stream")
+    s.set_defaults(fn=cmd_events)
+
+    s = sub.add_parser("rpc", help=argparse.SUPPRESS)
+    s.add_argument("--from", dest="peer")
+    s.add_argument("request", nargs=argparse.REMAINDER)
+    s.set_defaults(fn=cmd_rpc)
 
     s = sub.add_parser("install", help="set this machine up: tmux config, user units, hooks, skill")
     s.add_argument("--check", action="store_true", help="only report what differs")

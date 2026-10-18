@@ -9,20 +9,22 @@ each with its status glyph and unread count. Clicking an agent runs
 icon opens roster-pick. The icon gets a red badge when an agent is blocked,
 a magenta one when an agent has unread mail.
 
-It only reads the roster, through `roster list --json`, and rebuilds when
-something under ~/.local/state/roster/ changes (inotify, no polling), and again
-whenever the menu is opened.
+It only talks to the roster CLI: it reads `roster list --json`, which covers
+this machine and its peers, and rebuilds whenever `roster events --all` says
+something changed here or on a peer (inotify there, no polling), and again
+whenever the menu is opened. Agents on another machine sit under that
+machine's name.
 
 Needs the system python: dbus-python and PyGObject come with the image.
 Run by roster-tray.service.
 """
 
-import ctypes
 import json
 import os
 import struct
 import subprocess
 import sys
+from collections import OrderedDict
 
 import dbus
 import dbus.service
@@ -31,9 +33,6 @@ from gi.repository import GLib
 
 ROSTER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "roster")
 PICK = ROSTER + "-pick"
-STATE = os.path.join(
-    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "roster")
-AGENTS = os.path.join(STATE, "agents")
 
 ITEM_PATH = "/StatusNotifierItem"
 MENU_PATH = "/MenuBar"
@@ -86,55 +85,40 @@ def icon(size, badge=None):
     return dbus.Struct((size, size, dbus.ByteArray(bytes(out))), signature="iiay")
 
 
-# --- inotify ---------------------------------------------------------------
-
-IN_MODIFY, IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO = 0x2, 0x8, 0x40, 0x80
-IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_ONLYDIR = 0x100, 0x200, 0x400, 0x01000000
-IN_NONBLOCK, IN_CLOEXEC = 0o4000, 0o2000000
-MASK = IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_ONLYDIR
+# --- change events ---------------------------------------------------------
 
 
-class Watch:
-    """inotify on the state tree: agents/, each agent dir, each inbox/new."""
+class Events:
+    """`roster events --all`: a line whenever the roster here or on a peer changes."""
 
     def __init__(self, on_change):
-        self.libc = ctypes.CDLL("libc.so.6", use_errno=True)
-        self.fd = self.libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
-        if self.fd < 0:
-            raise OSError(ctypes.get_errno(), "inotify_init1")
         self.on_change = on_change
         self.pending = None
-        self.rewatch()
-        GLib.io_add_watch(self.fd, GLib.IO_IN, self.readable)
+        self.start()
 
-    def add(self, path):
-        self.libc.inotify_add_watch(self.fd, os.fsencode(path), MASK)
+    def start(self):
+        self.proc = subprocess.Popen([ROSTER, "events", "--all"], stdin=subprocess.DEVNULL,
+                                     stdout=subprocess.PIPE, stderr=subprocess.DEVNULL)
+        GLib.io_add_watch(self.proc.stdout, GLib.IO_IN | GLib.IO_HUP, self.readable)
 
-    def rewatch(self):
-        """Watch every directory that exists now; re-adding a watch is a no-op."""
-        os.makedirs(AGENTS, exist_ok=True)
-        self.add(STATE)
-        self.add(AGENTS)
-        for d in os.listdir(AGENTS):
-            path = os.path.join(AGENTS, d)
-            self.add(path)
-            self.add(os.path.join(path, "inbox"))
-            self.add(os.path.join(path, "inbox", "new"))
-
-    def readable(self, fd, cond):
-        try:
-            while os.read(self.fd, 65536):
-                pass
-        except BlockingIOError:
-            pass
-        # Debounce: a send or a status write is a burst of renames.
+    def readable(self, stream, cond):
+        line = stream.readline()
+        if not line:
+            self.proc.wait()
+            GLib.timeout_add_seconds(5, self.restart)
+            return False
+        # Debounce: a send or a status write is a burst of changes.
         if self.pending is None:
             self.pending = GLib.timeout_add(250, self.fire)
         return True
 
+    def restart(self):
+        self.start()
+        self.fire()
+        return False
+
     def fire(self):
         self.pending = None
-        self.rewatch()
         self.on_change()
         return False
 
@@ -172,8 +156,28 @@ class Menu(dbus.service.Object):
         if not rows:
             add(0, {"label": "No agents", "enabled": False})
 
+        machines = OrderedDict()
+        for e in rows:
+            machines.setdefault((e.get("machine"), e.get("local", True)), []).append(e)
+        for (mach, local), group in machines.items():
+            if not local:
+                add(0, {"type": "separator"})
+                note = "unreachable" if any(e.get("stale") for e in group) else "other machine"
+                add(0, {"label": label("@%s  (%s)" % (mach, note)), "enabled": False})
+            self.tree(add, group, None if local else mach)
+
+        changed = (items, kids) != (self.items, self.kids)
+        self.items, self.kids, self.actions = items, kids, actions
+        if changed:
+            self.revision += 1
+            self.LayoutUpdated(self.revision, 0)
+        return changed
+
+    def tree(self, add, rows, mach):
+        """One machine's agents as a tree: a lead is a submenu holding itself and those under it."""
         live = {e["name"]: e for e in rows}
         nodes = {}
+        at = "@" + mach if mach else ""
 
         def text(e):
             t = "%s  %s" % (GLYPH.get(e.get("status"), "?"), e["name"].rsplit("/", 1)[-1])
@@ -190,7 +194,7 @@ class Menu(dbus.service.Object):
             sub = add(parent, {"label": text(e) if e else label(path.rsplit("/", 1)[-1]),
                                "children-display": "submenu"})
             if e:
-                add(sub, {"label": label("Open %s" % path)}, [ROSTER, "attach", path])
+                add(sub, {"label": label("Open %s" % path)}, [ROSTER, "attach", path + at])
                 add(sub, {"type": "separator"})
             nodes[path] = sub
             return sub
@@ -208,14 +212,7 @@ class Menu(dbus.service.Object):
                 node(n)
                 continue
             parent = node(n.rsplit("/", 1)[0]) if "/" in n else 0
-            add(parent, {"label": text(live[n])}, [ROSTER, "attach", n])
-
-        changed = (items, kids) != (self.items, self.kids)
-        self.items, self.kids, self.actions = items, kids, actions
-        if changed:
-            self.revision += 1
-            self.LayoutUpdated(self.revision, 0)
-        return changed
+            add(parent, {"label": text(live[n])}, [ROSTER, "attach", n + at])
 
     def layout(self, iid, depth):
         props = dbus.Dictionary(self.items.get(iid, {}), signature="sv")
@@ -403,7 +400,7 @@ class Tray(dbus.service.Object):
 def main():
     DBusGMainLoop(set_as_default=True)
     tray = Tray(dbus.SessionBus())
-    Watch(tray.refresh)
+    Events(tray.refresh)
     GLib.MainLoop().run()
 
 

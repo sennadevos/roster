@@ -3,7 +3,8 @@
 
 A front end on the roster CLI, like roster-tray: it reads `roster list --json`
 and runs `roster attach <name>`, which focuses the agent's window or opens one.
-Meant for a compositor keybinding.
+Agents on another machine show with `@machine` and open over SSH. Meant for a
+compositor keybinding.
 """
 
 import json
@@ -29,7 +30,8 @@ def main():
     lines = []
     for e in rows:
         status = e.get("status") or "unknown"
-        line = "%s%s %s   %s" % ("    " * e["name"].count("/"), GLYPH.get(status, "?"), e["name"], status)
+        at = "" if e.get("local", True) else "  @" + e["machine"]
+        line = "%s%s %s%s   %s" % ("    " * e["name"].count("/"), GLYPH.get(status, "?"), e["name"], at, status)
         if e.get("unread"):
             line += "   ✉ %d" % e["unread"]
         lines.append(line)
@@ -41,7 +43,9 @@ def main():
         choice = pick.stdout.strip()
         if pick.returncode != 0 or not choice.isdigit():
             return  # cancelled
-        os.execv(ROSTER, [ROSTER, "attach", rows[int(choice)]["name"]])
+        e = rows[int(choice)]
+        target = e["name"] if e.get("local", True) else "%s@%s" % (e["name"], e["machine"])
+        os.execv(ROSTER, [ROSTER, "attach", target])
     sys.exit("neither fuzzel nor rofi is installed")
 
 
