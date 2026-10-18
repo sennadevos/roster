@@ -2185,7 +2185,10 @@ def cmd_install(args):
         run(["systemctl", "--user", "enable", "roster-tray.service"])
         run(["systemctl", "--user", "restart", "roster-tray.service"])
     if tmux_running():
-        tmux("set-option", "-g", "@machine", me)  # the live server, for titles
+        # The live server too, so open windows get the new titles right away.
+        tmux("source-file", conf_path)
+        for client in tmux("list-clients", "-F", "#{client_name}").split():
+            tmux("refresh-client", "-t", client)
     print("roster %s on %s" % (VERSION, me))
 
 
