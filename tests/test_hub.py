@@ -256,8 +256,14 @@ class HubTest(unittest.TestCase):
         status, got = self.request("POST", "/v1/new", {"machine": "hub1", "cwd": "-x", "name": "docs", "role": "writes docs",
                                                         "prompt": "go"}, token=self.token)
         self.assertEqual((status, got), (200, {"agent": "docs@hub1"}))
-        self.assertIn({"argv": ["new", "--on=hub1", "--no-attach", "--name=docs", "--role=writes docs", "--prompt=-", "--", "-x"],
-                       "stdin": "go"}, self.calls())
+        self.assertIn({"argv": ["new", "--on=hub1", "--no-attach", "--name=docs", "--role=writes docs", "--prompt=-",
+                                "--json", "--", "-x"], "stdin": "go"}, self.calls())
+        self.assertEqual(self.request("POST", "/v1/new", {"machine": "hub1", "model": "opus", "effort": "xhigh"},
+                                      token=self.token)[0], 200)
+        self.assertIn(["new", "--on=hub1", "--no-attach", "--model=opus", "--effort=xhigh", "--json"],
+                      [c["argv"] for c in self.calls()])
+        self.assertEqual(self.request("POST", "/v1/new", {"machine": "hub1", "effort": "huge"}, token=self.token)[0], 400)
+        self.assertEqual(self.request("POST", "/v1/new", {"machine": "hub1", "model": "opus; rm"}, token=self.token)[0], 400)
         self.assertEqual(self.request("POST", "/v1/new", {"machine": "laptop"}, token=self.token), (200, {"agent": "ab12cd34@laptop"}))
         self.assertEqual(self.request("POST", "/v1/new", {"machine": "-x"}, token=self.token)[0], 400)
         self.assertEqual(self.request("POST", "/v1/new", {"machine": "hub1", "name": "Bad Name"}, token=self.token)[0], 400)

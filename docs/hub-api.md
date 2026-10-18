@@ -71,7 +71,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 | `GET /v1/screen` | `?agent=` | as `roster screen --json` |
 | `POST /v1/prompt` | `{"agent", "text"}` | `{"ok": true}` |
 | `POST /v1/keys` | `{"agent", "keys": [...]}` | `{"ok": true}` |
-| `POST /v1/new` | `{"machine", "cwd", "name", "role", "prompt"}` (all but `machine` optional) | `{"agent"}` |
+| `POST /v1/new` | `{"machine", "cwd", "name", "role", "prompt", "model", "effort"}` (all but `machine` optional; `effort` is `low`, `medium`, `high`, `xhigh` or `max`; `model` an alias such as `opus` or a full model name) | `{"agent"}` |
 | `POST /v1/resume` | `{"agent"}` | `{"ok": true}` |
 | `POST /v1/kill` | `{"agent"}` | `{"ok": true}` |
 | `POST /v1/push` | `{"endpoint"}` (UnifiedPush endpoint URL), or `{"endpoint": null}` to stop | `{"ok": true}` |
