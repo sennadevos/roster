@@ -190,6 +190,8 @@ MAIL_EVENTS = ("Stop", "PostToolUse", "UserPromptSubmit")
 TRANSIENT = ("rate_limit", "overloaded", "server_error", "unknown")
 # Revives in a row without a turn that ends normally, before giving up.
 REVIVE_MAX = 5
+# Claude Code's --effort levels.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
 # Notification types that mean the agent waits on the user.
 ASKING = ("permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input")
 
@@ -746,6 +748,15 @@ def reconcile():
                 save(e)
                 continue
             matched[e["name"]] = s
+            if e.get("status") == "unknown":
+                # Before its first hook runs, a new Claude may be stuck asking
+                # whether to trust the folder; nothing reports that but the screen.
+                try:
+                    if "trust this folder" in tmux("capture-pane", "-p", "-t", e["pane_id"]):
+                        e.update(status="blocked", status_at=now())
+                        save(e)
+                except Fail:
+                    pass
     return matched
 
 
@@ -1275,8 +1286,12 @@ def cmd_new(args):
         if args.name:
             check_free(check_name(args.name))
         got = rpc(args.on, "new", data={"cwd": args.cwd, "name": args.name, "role": args.role,
-                                        "prompt": prompt})
-        print("started %s@%s in %s" % (got["name"], args.on, got["cwd"]))
+                                        "prompt": prompt, "model": args.model, "effort": args.effort})
+        if args.json:
+            print(json.dumps({"agent": "%s@%s" % (got["name"], args.on), "name": got["name"],
+                              "machine": args.on, "cwd": got["cwd"]}))
+        else:
+            print("started %s@%s in %s" % (got["name"], args.on, got["cwd"]))
         if args.no_attach:
             return
         if not args.window and sys.stdin.isatty() and sys.stdout.isatty():
@@ -1285,8 +1300,12 @@ def cmd_new(args):
             os.execv(argv[0], argv)
         print(attach_remote(args.on, {"name": got["name"], "attached": False}))
         return
-    entry = new_agent(args.cwd, args.name, args.role, prompt)
-    print("started %s in %s" % (entry["name"], short_path(entry["cwd"])))
+    entry = new_agent(args.cwd, args.name, args.role, prompt, args.model, args.effort)
+    if args.json:
+        print(json.dumps({"agent": "%s@%s" % (entry["name"], machine()), "name": entry["name"],
+                          "machine": machine(), "cwd": short_path(entry["cwd"])}))
+    else:
+        print("started %s in %s" % (entry["name"], short_path(entry["cwd"])))
     if args.no_attach:
         return
     pane = entry["pane_id"]
@@ -1295,7 +1314,16 @@ def cmd_new(args):
     print(attach(entry, {"pane_id": pane, "roster": entry["name"], "attached": 0}))
 
 
-def new_agent(cwd, name, role, prompt):
+def model_args(model, effort):
+    """Claude Code's own --model and --effort; checked here so a typo fails before a session starts."""
+    if effort and effort not in EFFORTS:
+        raise Fail("effort is one of %s" % ", ".join(EFFORTS))
+    if model and not re.match(r"^[A-Za-z0-9._\[\]-]+$", model):
+        raise Fail("bad model name %r" % model)
+    return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
+
+
+def new_agent(cwd, name, role, prompt, model=None, effort=None):
     """Start a Claude agent in a roster tmux session on this machine; return its entry."""
     cwd = os.path.realpath(os.path.expanduser(cwd or os.getcwd()))
     if not os.path.isdir(cwd):
@@ -1310,7 +1338,7 @@ def new_agent(cwd, name, role, prompt):
     else:
         name = fresh_id()
     session_id = str(uuid.uuid4())
-    claude_args = ["--session-id", session_id, "--name", name]
+    claude_args = ["--session-id", session_id, "--name", name] + model_args(model, effort)
     if prompt and prompt.strip():
         claude_args.append(prompt)  # claude takes it as the first prompt, typed by the user
     pane = start_session(name, cwd, claude_args)
@@ -1331,6 +1359,11 @@ def new_agent(cwd, name, role, prompt):
         "ended_at": None,
         "end_reason": None,
     }
+    # Kept, so `resume` starts it the same way again.
+    if model:
+        entry["model"] = model
+    if effort:
+        entry["effort"] = effort
     if scratch:
         entry["scratch"] = True
     save(entry)
@@ -1378,7 +1411,8 @@ def cmd_resume(args):
     name, mach = split_target(args.name)
     name = check_name(name)
     if mach and mach != machine():
-        got = rpc(mach, "resume", name)
+        got = rpc(mach, "resume", name, *(["--model", args.model] if args.model else []),
+                  *(["--effort", args.effort] if args.effort else []))
         print("resumed %s@%s in %s" % (name, mach, got["cwd"]))
         if not args.no_attach:
             print(attach_remote(mach, {"name": name, "attached": False}))
@@ -1389,7 +1423,7 @@ def cmd_resume(args):
         raise Fail("no agent named %s on the roster" % name)
     if e.get("status") != "gone":
         raise Fail("%s is %s; only a gone agent can be resumed" % (name, e.get("status")))
-    pane = resume_in_tmux(e)
+    pane = resume_in_tmux(e, args.model, args.effort)
     print("resumed %s in %s" % (name, short_path(e["cwd"])))
     if not args.no_attach:
         print(attach(e, {"pane_id": pane, "roster": name, "attached": 0}))
@@ -1465,12 +1499,20 @@ def transcript_cwd(session_id):
     return None
 
 
-def resume_in_tmux(e):
-    """Start a gone entry's Claude session again in a roster tmux session; return its id."""
+def resume_in_tmux(e, model=None, effort=None):
+    """Start a gone entry's Claude session again in a roster tmux session; return its id.
+
+    With the model and effort it was started with, unless new ones are given.
+    """
     cwd = transcript_cwd(e.get("session_id")) or e.get("cwd")
     if not e.get("session_id") or not cwd or not os.path.isdir(cwd):
         raise Fail("%s has no session or working directory to resume from" % e["name"])
-    pane = start_session(e["name"], cwd, ["--resume", e["session_id"], "--name", e["name"]])
+    if model:
+        e["model"] = model
+    if effort:
+        e["effort"] = effort
+    pane = start_session(e["name"], cwd, ["--resume", e["session_id"], "--name", e["name"]]
+                         + model_args(e.get("model"), e.get("effort")))
     e.update(backend="tmux", pane_id=pane, workspace_id=None, tab_id=None, cwd=cwd,
              status="unknown", status_at=now(), ended_at=None, end_reason=None)
     save(e)
@@ -2204,14 +2246,16 @@ def cmd_rpc(args):
             return rpc_attach(check_name(rest[0]))
         elif verb == "new":
             p = json.load(sys.stdin)
-            e = new_agent(p.get("cwd") or "~", p.get("name"), p.get("role"), p.get("prompt"))
+            e = new_agent(p.get("cwd") or "~", p.get("name"), p.get("role"), p.get("prompt"),
+                          p.get("model"), p.get("effort"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
         elif verb == "resume":
             reconcile()
             e = load(check_name(rest[0]))
             if not e or e.get("status") != "gone":
                 raise Fail("%s is %s here" % (rest[0], e.get("status") if e else "unknown"))
-            resume_in_tmux(e)
+            opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
+            resume_in_tmux(e, opt("--model"), opt("--effort"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
         elif verb == "kill":
             out = {"name": kill_local(check_name(rest[0]))}
@@ -2393,16 +2437,22 @@ def cmd_peer(args):
     if args.action == "accept":
         return peer_accept(args)
     if args.action == "list":
-        recs = peers()
-        if not recs:
-            print("no peers; add one with `roster peer add user@host`")
-        for m, rec in sorted(recs.items()):
+        out = []
+        for m, rec in sorted(peers().items()):
+            row = {"machine": m, "ssh": rec["ssh"], "reachable": False, "version": None, "error": None}
             try:
                 v = rpc(m, "version", timeout=8)
-                state = "roster %s" % v["version"]
+                row.update(reachable=True, version=v["version"])
             except Fail as exc:
-                state = str(exc)
-            print("%-20s %-28s %s" % (m, rec["ssh"], state))
+                row["error"] = str(exc)
+            out.append(row)
+        if args.json:
+            print(json.dumps({"machine": machine(), "version": VERSION, "peers": out}))
+            return
+        if not out:
+            print("no peers; add one with `roster peer add user@host`")
+        for r in out:
+            print("%-20s %-28s %s" % (r["machine"], r["ssh"], "roster %s" % r["version"] if r["reachable"] else r["error"]))
         return
     if args.action == "update":
         rec = peer(args.machine)
@@ -2758,6 +2808,9 @@ def main():
     s.add_argument("--name", help="roster name (default: a random placeholder the agent renames)")
     s.add_argument("--role", help="its one-line role on the roster")
     s.add_argument("--prompt", help="first prompt, as if typed by the user; - reads stdin")
+    s.add_argument("--model", help="Claude model: an alias (opus, sonnet, fable) or a full name")
+    s.add_argument("--effort", choices=EFFORTS, help="Claude effort level")
+    s.add_argument("--json", action="store_true", help="say what started as JSON")
     s.add_argument("--window", action="store_true", help="open a new window even when run from a terminal")
     s.add_argument("--no-attach", action="store_true", help="leave it detached")
     s.set_defaults(fn=cmd_new)
@@ -2772,6 +2825,8 @@ def main():
 
     s = sub.add_parser("resume", help="bring a gone agent back in a tmux session (claude --resume)")
     s.add_argument("name")
+    s.add_argument("--model", help="start it with another model than before")
+    s.add_argument("--effort", choices=EFFORTS, help="start it with another effort level than before")
     s.add_argument("--no-attach", action="store_true", help="do not open a window")
     s.set_defaults(fn=cmd_resume)
 
@@ -2812,6 +2867,7 @@ def main():
     s.add_argument("action", choices=["add", "list", "update", "remove", "accept"])
     s.add_argument("target", nargs="?", help="add: user@host; update/remove: machine")
     s.add_argument("--no-install", action="store_true", help="add: roster is already installed there")
+    s.add_argument("--json", action="store_true", help="list: as JSON")
     s.add_argument("--from", dest="peer", help=argparse.SUPPRESS)
     s.add_argument("--user", help=argparse.SUPPRESS)
     s.add_argument("--key", help=argparse.SUPPRESS)
