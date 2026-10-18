@@ -28,8 +28,10 @@ def main():
     if cmd == "version":
         print("roster 0.2.0 (protocol 1) on hub1")
     elif cmd == "peer":
-        print("%-20s %-28s %s" % ("laptop", "me@laptop", "roster 0.2.0"))
-        print("%-20s %-28s %s" % ("idle-box", "me@idle-box", "@idle-box: connection refused"))
+        print(json.dumps({"machine": "hub1", "version": "0.3.0", "peers": [
+            {"machine": "laptop", "ssh": "me@laptop", "reachable": True, "version": "0.3.0", "error": None},
+            {"machine": "idle-box", "ssh": "me@idle-box", "reachable": False, "version": None,
+             "error": "@idle-box: connection refused"}]}))
     elif cmd == "list":
         with open(os.path.join(D, "rows.json")) as f:
             print(f.read())
@@ -59,10 +61,8 @@ def main():
     elif cmd == "new":
         name = next((a.split("=", 1)[1] for a in argv if a.startswith("--name=")), "ab12cd34")
         on = next(a.split("=", 1)[1] for a in argv if a.startswith("--on="))
-        if on == "hub1":
-            print("started %s in ~/src" % name)
-        else:
-            print("started %s@%s in /home/me" % (name, on))
+        print(json.dumps({"agent": "%s@%s" % (name, on), "name": name, "machine": on,
+                          "cwd": "~/src" if on == "hub1" else "/home/me"}))
     elif cmd in ("resume", "kill"):
         if argv[1].startswith("nobody@"):
             fail("no agent named nobody on the roster")

@@ -113,6 +113,9 @@ class Fail(Exception):
     pass
 
 
+# Claude Code's --effort levels, as `roster new --effort` takes them.
+EFFORTS = ("low", "medium", "high", "xhigh", "max")
+
 class HttpError(Exception):
     """An answer other than 200, with `{"error": message}` as its body."""
 
@@ -477,13 +480,13 @@ class Hub:
 
     def refresh_peers(self):
         """Every peer and whether it answers, so a machine with no agents is listed too."""
-        out = cli("peer", "list", timeout=90)
+        out = cli("peer", "list", "--json", timeout=90, as_json=True)
+        if isinstance(out, dict) and MACHINE_RE.fullmatch(str(out.get("machine"))):
+            self.local = out["machine"]
         state = {}
-        for line in out.splitlines():
-            parts = line.split(None, 2)
-            if len(parts) == 3 and MACHINE_RE.fullmatch(parts[0]) and not line.startswith("no peers"):
-                ok = parts[2].startswith("roster ")
-                state[parts[0]] = (ok, None if ok else parts[2])
+        for p in (out.get("peers") if isinstance(out, dict) else None) or []:
+            if MACHINE_RE.fullmatch(str(p.get("machine"))):
+                state[p["machine"]] = (bool(p.get("reachable")), p.get("error"))
         if state != self.peer_state:
             self.peer_state = state
             self.wake.set()
@@ -930,17 +933,25 @@ class Handler(http.server.BaseHTTPRequestHandler):
         prompt = check_text(b.get("prompt"), "prompt", 64 * 1024) or None
         if prompt is not None:
             args.append("--prompt=-")
+        model = check_text(b.get("model"), "model", 100, oneline=True) or None
+        if model is not None:
+            if not re.fullmatch(r"[A-Za-z0-9._\[\]-]+", model):
+                raise HttpError(400, "bad model name")
+            args.append("--model=" + model)
+        effort = b.get("effort")
+        if effort is not None:
+            if effort not in EFFORTS:
+                raise HttpError(400, "effort is one of %s" % ", ".join(EFFORTS))
+            args.append("--effort=" + effort)
+        args.append("--json")
         cwd = check_text(b.get("cwd"), "cwd", 4096, oneline=True) or None
         if cwd is not None:
             args += ["--", cwd]  # after --, a cwd starting with - is still a path
-        out = cli(*args, stdin=prompt, timeout=90)
-        m = re.search(r"^started (\S+) in ", out, re.M)
-        if not m:
-            log("roster new said: %r" % out[:500])
+        out = cli(*args, stdin=prompt, timeout=90, as_json=True)
+        if not isinstance(out, dict) or not out.get("agent"):
             raise HttpError(502, "roster new did not say what it started")
-        agent = m.group(1) if "@" in m.group(1) else "%s@%s" % (m.group(1), mach)
         self.hub.wake.set()
-        return {"agent": agent}
+        return {"agent": out["agent"]}
 
     def r_resume(self):
         cli("resume", check_agent(self.body.get("agent")), "--no-attach", timeout=90)
