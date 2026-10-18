@@ -181,6 +181,8 @@ class Menu(dbus.service.Object):
 
         def text(e):
             t = "%s  %s" % (GLYPH.get(e.get("status"), "?"), e["name"].rsplit("/", 1)[-1])
+            if e.get("stalled"):
+                t += "   ⚠ API error"
             if e.get("unread"):
                 t += "   ✉ %d" % e["unread"]
             return label(t)

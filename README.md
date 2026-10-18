@@ -24,6 +24,10 @@ roster kill | resume | rename | cleanup                # see roster -h
 
 Agents use the `roster` skill to join, rename themselves, and message each other. `roster-tray` (a StatusNotifierItem menu) and `roster-pick` (a fuzzel menu for a keybinding) are front ends on the CLI.
 
+## API errors
+
+When a turn ends on a transient API error (connection lost, DNS, overloaded, server error, rate limit), roster marks the agent in `roster list` and leaves a small reviver behind. Once the API host answers again (and at least five minutes after a rate limit), it types a prompt to carry on into the agent, but only when it is idle, nobody is in its window and its input line is empty. Five failed revives in a row and it gives up; login and billing errors are only shown. `roster revive <name>` does the same by hand.
+
 ## Other machines
 
 ```sh

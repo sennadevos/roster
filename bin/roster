@@ -185,6 +185,11 @@ SCRATCH_ROLE = "new agent; no name or task yet"
 # `terminal`. The tmux attach command is appended; `{title}` is replaced.
 DEFAULT_TERMINAL = ["kitty", "--class", "roster", "-o", "confirm_os_window_close=0"]
 MAIL_EVENTS = ("Stop", "PostToolUse", "UserPromptSubmit")
+# StopFailure error types worth trying again once the API answers; the others
+# (login, billing, a bad request) need the user.
+TRANSIENT = ("rate_limit", "overloaded", "server_error", "unknown")
+# Revives in a row without a turn that ends normally, before giving up.
+REVIVE_MAX = 5
 # Notification types that mean the agent waits on the user.
 ASKING = ("permission_prompt", "elicitation_dialog", "elicitation_url_dialog", "agent_needs_input")
 
@@ -987,6 +992,14 @@ def render_list(rows, color=False, width=None):
         n = e.get("unread", 0)
         if n:
             head += "  " + paint("1;35", "✉ %d unread" % n)
+        st = e.get("stalled")
+        if st and not ended:
+            if st.get("gave_up"):
+                head += "  " + paint("1;31", "⚠ API error (%s); gave up resuming" % st["error"])
+            elif st["error"] in TRANSIENT:
+                head += "  " + paint("1;31", "⚠ API error (%s); resumes when the API answers" % st["error"])
+            else:
+                head += "  " + paint("1;31", "⚠ API error (%s); needs you" % st["error"])
         lines.append(head)
         indent = pad + "  "
         role = e.get("role") or "-"
@@ -1485,6 +1498,114 @@ def prompt_is_empty(e):
             typed = re.sub(r"\x1b\[[0-9;]*[A-Za-z]", "", typed)
             return not typed.split("❯", 1)[1].strip()
     return False
+
+
+def revive_marker(session_id):
+    return os.path.join(STATE, "revive", session_id)
+
+
+def revive_count(name):
+    return os.path.join(agent_dir(name), "revives")
+
+
+def clear_revives(name):
+    try:
+        os.remove(revive_count(name))
+    except OSError:
+        pass
+
+
+def spawn_revive(session_id):
+    """Leave a detached `roster revive` that resumes the agent once the API answers."""
+    if fresh_marker(revive_marker(session_id), 6 * 3600):
+        return
+    write_atomic(revive_marker(session_id), now() + "\n")
+    subprocess.Popen(
+        [sys.executable, os.path.abspath(__file__), "revive", "--session", session_id],
+        stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+        start_new_session=True,
+    )
+
+
+def api_reachable():
+    """Whether the Anthropic API host resolves and takes a TCP connection."""
+    host = "api.anthropic.com"
+    base = os.environ.get("ANTHROPIC_BASE_URL")
+    if base:
+        host = re.sub(r"^[a-z]+://", "", base).split("/")[0].split(":")[0] or host
+    try:
+        socket.create_connection((host, 443), timeout=5).close()
+        return True
+    except OSError:
+        return False
+
+
+def cmd_revive(args):
+    """Resume an agent whose turn ended on an API error, once the API answers again.
+
+    Run detached by the StopFailure hook, or by hand with a name. It waits for
+    the API host to take a connection (and five minutes after a rate limit),
+    then, the same way a wake does, only into an idle agent the user is not in
+    whose input line is empty, types a prompt to carry on. A turn that ends
+    normally resets the count; after REVIVE_MAX in a row it gives up.
+    """
+    if not args.session:
+        e = load(check_name(args.name))
+        if not e or backend(e) != "tmux" or e.get("status") in ENDED:
+            raise Fail("%s is not a live tmux agent here" % args.name)
+        if not e.get("stalled"):
+            e["stalled"] = {"error": "unknown", "at": now(), "message": "marked by hand"}
+            save(e)
+        clear_revives(e["name"])
+        try:
+            os.remove(revive_marker(e["session_id"]))
+        except OSError:
+            pass
+        spawn_revive(e["session_id"])
+        print("%s resumes once the API answers and nobody is typing there" % e["name"])
+        return
+    sid = args.session
+    try:
+        name = name_for_session(sid)
+        try:
+            with open(revive_count(name)) as f:
+                done = int(f.read().strip() or 0)
+        except (OSError, ValueError, TypeError):
+            done = 0
+        time.sleep(min(30 * 2 ** done, 900))  # back off when it keeps failing
+        deadline = time.time() + 6 * 3600
+        while time.time() < deadline:
+            name = name_for_session(sid)
+            e = load(name) if name else None
+            if not e or e.get("session_id") != sid or e.get("status") in ENDED:
+                return
+            st = e.get("stalled")
+            if not st or st.get("gave_up"):
+                return  # it was prompted some other way
+            ready = api_reachable()
+            if ready and st["error"] == "rate_limit":
+                ready = time.time() - datetime.strptime(st["at"], "%Y-%m-%dT%H:%M:%S%z").timestamp() > 300
+            if ready:
+                try:
+                    a = (tmux_sessions() or {}).get(e["pane_id"])
+                    if (a and a["roster"] == e["name"] and e.get("status") in ("idle", "done")
+                            and not user_is_on(e, a) and prompt_is_empty(e)):
+                        if done >= REVIVE_MAX:
+                            st["gave_up"] = True
+                            save(e)
+                            return
+                        write_atomic(revive_count(e["name"]), "%d\n" % (done + 1))
+                        submit(e, "[roster] Your last turn ended on an API error (%s). The API answers "
+                                  "again: carry on where you left off." % (st.get("message") or st["error"]))
+                        return
+                except Fail:
+                    pass
+            time.sleep(30)
+    finally:
+        try:
+            os.remove(revive_marker(sid))
+        except OSError:
+            pass
 
 
 def retitle_marker(session_id):
@@ -2283,12 +2404,22 @@ def hook_status(name, session_id, event, data, stop_blocked):
     if not e or backend(e) != "tmux" or e.get("session_id") != session_id or e.get("status") in ENDED:
         return
     cur, new = e.get("status"), None
+    stalled = e.get("stalled")
     if event == "UserPromptSubmit":
         new = "working"
+        e.pop("stalled", None)  # a turn is under way again
     elif event == "Stop":
         new = "working" if stop_blocked else "idle"
+        e.pop("stalled", None)
+        if not stop_blocked:
+            clear_revives(e["name"])  # a turn ended normally
     elif event == "StopFailure":
         new = "idle"
+        error = data.get("error") or "unknown"
+        e["stalled"] = {"error": error, "at": now(),
+                        "message": str(data.get("last_assistant_message") or "")[:200]}
+        if error in TRANSIENT:
+            spawn_revive(session_id)
     elif event == "PermissionRequest":
         new = "blocked"
     elif event == "PostToolUse" and cur == "blocked":
@@ -2299,8 +2430,9 @@ def hook_status(name, session_id, event, data, stop_blocked):
             new = "blocked"
         elif kind == "idle_prompt":
             new = "idle"
-    if new and new != cur:
-        e.update(status=new, status_at=now())
+    if (new and new != cur) or e.get("stalled") != stalled:
+        if new and new != cur:
+            e.update(status=new, status_at=now())
         save(e)
 
 
@@ -2452,6 +2584,11 @@ def main():
     s = sub.add_parser("wake-later", help=argparse.SUPPRESS)
     s.add_argument("name")
     s.set_defaults(fn=cmd_wake_later)
+
+    s = sub.add_parser("revive", help="resume an agent stuck on an API error once the API answers")
+    s.add_argument("name", nargs="?")
+    s.add_argument("--session", help=argparse.SUPPRESS)
+    s.set_defaults(fn=cmd_revive)
 
     s = sub.add_parser("retitle", help=argparse.SUPPRESS)
     s.add_argument("session_id")
