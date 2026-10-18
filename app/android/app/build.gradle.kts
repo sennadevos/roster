@@ -43,10 +43,25 @@ android {
         versionName = flutter.versionName
     }
 
+    // The release key comes from the environment (tool/release.sh decodes it
+    // from the owner's secrets); without it a release build is signed with
+    // the debug key, which a phone with the real app will refuse to update.
+    val releaseStore = System.getenv("ROSTER_KEYSTORE")
+    signingConfigs {
+        if (releaseStore != null) {
+            create("release") {
+                storeFile = file(releaseStore)
+                storeType = "PKCS12"
+                storePassword = System.getenv("ROSTER_KEYSTORE_PASSWORD")
+                keyAlias = "roster"
+                keyPassword = System.getenv("ROSTER_KEYSTORE_PASSWORD")
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // Signed with the debug key for now; release signing comes later.
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = signingConfigs.getByName(if (releaseStore != null) "release" else "debug")
         }
     }
 }

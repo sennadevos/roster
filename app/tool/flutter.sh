@@ -10,7 +10,13 @@ set -eu
 here=$(cd "$(dirname "$0")/.." && pwd)
 image=localhost/roster-app-build:3.47.7
 podman image exists "$image" || podman build -t "$image" -f "$here/Containerfile" "$here"
-exec podman run --rm \
+# The release key, when tool/release.sh hands one over.
+keys=
+if [ -n "${ROSTER_KEYSTORE_HOST:-}" ]; then
+  keys="-v $ROSTER_KEYSTORE_HOST:/keys/roster.jks:ro,z -e ROSTER_KEYSTORE=/keys/roster.jks -e ROSTER_KEYSTORE_PASSWORD"
+fi
+# shellcheck disable=SC2086
+exec podman run --rm $keys \
   -v "$here:/app:z" \
   -v roster-app-pub:/root/.pub-cache \
   -v roster-app-gradle:/root/.gradle \
