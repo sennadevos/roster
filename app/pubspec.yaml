@@ -1,0 +1,32 @@
+name: roster
+description: "Phone app for roster-hub: the roster's agents, their conversations and dialogs."
+publish_to: 'none'
+version: 0.1.0+1
+
+environment:
+  sdk: ^3.13.5
+
+# Exact versions, looked up on pub.dev on 2026-10-18; pubspec.lock pins the rest.
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_local_notifications: 22.3.2
+  flutter_markdown_plus: 1.0.12
+  flutter_secure_storage: 11.2.0
+  http: 1.6.0
+  unifiedpush: 6.2.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: 6.0.0
+
+# unifiedpush depends on unifiedpush_linux, which brings webcrypto and its
+# native build (BoringSSL through CMake, for every target). Android does not
+# use any of it, so an empty local package stands in.
+dependency_overrides:
+  unifiedpush_linux:
+    path: packages/unifiedpush_linux
+
+flutter:
+  uses-material-design: true
