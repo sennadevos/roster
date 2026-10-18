@@ -1735,13 +1735,17 @@ def locate(name, mach=None):
             return ("local", e)
         if mach:
             raise Fail("no agent named %s on this machine" % name)
-    hits = []
-    for m, got in peer_lists(True).items():
+    hits, lists = [], peer_lists(True)
+    for m, got in lists.items():
         if mach in (None, m):
             hits += [(m, r) for r in got["rows"] if r["name"] == name]
     live = [h for h in hits if h[1].get("status") not in ENDED]
     hits = live or hits
     if not hits:
+        if mach in lists and lists[mach]["error"]:
+            # Named outright, on a peer that does not answer: take its word for it,
+            # so mail waits in the outbox instead of failing.
+            return ("remote", mach, {"name": name})
         e = load(name)
         if e:
             return ("local", e)  # gone here, and nowhere else
