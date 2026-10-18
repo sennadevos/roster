@@ -60,11 +60,12 @@ trap 'rm -rf "$tmp"' EXIT
 version="$(date +%Y%m%d%H%M%S)"
 dest="$PREFIX/versions/$version"
 mkdir -p "$dest"
+# install.sh comes along, so `roster peer add` can install this same version elsewhere.
 if [ -n "$FROM" ]; then
-    cp -R "$FROM/bin" "$FROM/share" "$dest/"
+    cp -R "$FROM/bin" "$FROM/share" "$FROM/install.sh" "$dest/"
 else
     curl -fsSL --retry 3 "https://codeload.github.com/$REPO/tar.gz/$REF" | tar -xz -C "$tmp"
-    cp -R "$tmp"/*/bin "$tmp"/*/share "$dest/"
+    cp -R "$tmp"/*/bin "$tmp"/*/share "$tmp"/*/install.sh "$dest/"
 fi
 chmod +x "$dest"/bin/*
 ln -s "versions/$version" "$PREFIX/current.new"
