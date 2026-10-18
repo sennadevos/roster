@@ -110,6 +110,7 @@ EOF
 }
 wrapper roster "$PY"
 wrapper roster-pick "$PY"
+wrapper roster-hub "$PY"
 if [ -x /usr/bin/python3 ]; then
     wrapper roster-tray /usr/bin/python3
 fi

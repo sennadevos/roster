@@ -43,6 +43,18 @@ installs roster on that host over your SSH and links the two machines both ways.
 
 Every row and message says which machine it is from, so agents know that paths on another machine are not theirs.
 
+## Phone app and roster-hub
+
+`roster-hub` is a small HTTP API and event stream over the roster CLI, for the Android app. It runs on one always-on machine and does everything through `roster` there, so the phone sees and drives every agent on every linked machine: the list, each agent's conversation and screen, prompts, dialog answers, new, resume and kill, and push notifications (through UnifiedPush and ntfy) when an agent blocks, finishes a long turn or hits an API error that needs you. The API is in [docs/hub-api.md](docs/hub-api.md).
+
+```sh
+roster install --hub          # writes and starts the roster-hub user unit
+roster-hub pair --name pixel  # a one-time code for the app, valid 10 minutes
+roster-hub devices            # paired phones; roster-hub revoke <id> removes one
+```
+
+Config is `~/.config/roster/hub.toml`: `listen` (a private `host:port`; the hub refuses public and wildcard addresses), `public_url` (what the app connects to), `push_token_file` (default `~/.config/secrets/ntfy-roster-hub-token`) and `push_allowed` (URL prefixes a phone's push endpoint must start with, default `https://ntfy.sennadevos.com/`). It speaks plain HTTP: put a TLS reverse proxy in front of it, which must set `X-Forwarded-For`. Paired devices are in `~/.local/state/roster/hub/devices.json`, which holds only hashes of their tokens.
+
 ## State
 
 `~/.local/state/roster/`: `agents/<name>/agent.json` and `inbox/{tmp,new,cur}` per agent, `sessions/<claude session id>`, `peers/`, `outbox/`. Every write is a temp file renamed into place.

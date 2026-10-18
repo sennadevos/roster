@@ -2267,6 +2267,19 @@ RestartSec=5
 WantedBy=graphical-session.target
 """
 
+HUB_SERVICE = """[Unit]
+Description=roster-hub: the roster's API for phones
+
+[Service]
+# Written by `roster install --hub`. Listens where ~/.config/roster/hub.toml says.
+ExecStart=%h/.local/bin/roster-hub serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
 
 def put(path, text, check):
     """Write a file when its content differs; say what happened."""
@@ -2335,6 +2348,8 @@ def cmd_install(args):
     if args.tray:
         done.append(put(os.path.join(units, "roster-tray.service"),
                         TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
+    if args.hub:
+        done.append(put(os.path.join(units, "roster-hub.service"), HUB_SERVICE, args.check))
     print("\n".join(done))
     if args.check:
         return
@@ -2342,6 +2357,9 @@ def cmd_install(args):
     if args.tray:
         run(["systemctl", "--user", "enable", "roster-tray.service"])
         run(["systemctl", "--user", "restart", "roster-tray.service"])
+    if args.hub:
+        run(["systemctl", "--user", "enable", "roster-hub.service"])
+        run(["systemctl", "--user", "restart", "roster-hub.service"])
     if tmux_running():
         # The live server too, so open windows get the new titles right away.
         try:
@@ -2576,6 +2594,7 @@ def main():
     s.add_argument("--no-hooks", action="store_true", help="leave ~/.claude/settings.json alone")
     s.add_argument("--no-skill", action="store_true", help="leave ~/.claude/skills/roster alone")
     s.add_argument("--tray", action="store_true", help="also install and enable the tray")
+    s.add_argument("--hub", action="store_true", help="also install and enable roster-hub, the API for phones")
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("version", help="print roster's version")

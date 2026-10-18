@@ -1,0 +1,1108 @@
+#!/usr/bin/env python3
+"""roster-hub: the roster as a JSON API and an event stream, for phones.
+
+It runs on one always-on machine and does everything through the roster CLI
+there, so it reaches every agent on every linked machine without knowing how.
+The contract with the CLI and the app is docs/hub-api.md.
+
+It listens on plain HTTP on a private address only; a reverse proxy in front of
+it does TLS. Everything but /v1/version and /v1/pair needs a device token, got
+by redeeming a one-time code from `roster-hub pair`.
+
+State lives under ${XDG_STATE_HOME:-~/.local/state}/roster/hub/:
+
+    devices.json    the paired devices: id, name, the SHA-256 of the token
+                    (never the token), created and last-seen times, push endpoint
+    pairing.json    the codes not yet redeemed, also only as SHA-256
+    lock            flock'd around every read-modify-write of those two, since
+                    `roster-hub pair` and `revoke` write them from other processes
+
+Config is ${XDG_CONFIG_HOME:-~/.config}/roster/hub.toml:
+
+    listen = "10.137.42.3:8790"            # a private or loopback address
+    public_url = "https://roster.sennadevos.com"
+    push_token_file = "~/.config/secrets/ntfy-roster-hub-token"
+    push_allowed = ["https://ntfy.sennadevos.com/"]   # endpoint URL prefixes
+"""
+
+import argparse
+import contextlib
+import fcntl
+import hashlib
+import hmac
+import http.server
+import ipaddress
+import json
+import os
+import queue
+import re
+import secrets
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import threading
+import time
+import tomllib
+import traceback
+import urllib.error
+import urllib.parse
+import urllib.request
+from collections import deque
+from datetime import datetime
+
+VERSION = "0.3.0"
+API = 1
+
+STATE = os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"),
+    "roster", "hub",
+)
+CONFIG = os.path.join(
+    os.environ.get("XDG_CONFIG_HOME") or os.path.expanduser("~/.config"),
+    "roster", "hub.toml",
+)
+DEVICES = os.path.join(STATE, "devices.json")
+CODES = os.path.join(STATE, "pairing.json")
+LOCK = os.path.join(STATE, "lock")
+
+DEFAULTS = {
+    "listen": "127.0.0.1:8790",
+    "public_url": "https://roster.sennadevos.com",
+    "push_token_file": "~/.config/secrets/ntfy-roster-hub-token",
+    # The ntfy token goes with every push, so a push endpoint must be on the
+    # ntfy server; otherwise any paired phone could have the hub send it anywhere.
+    "push_allowed": ["https://ntfy.sennadevos.com/"],
+}
+
+# Names as the CLI has them. fullmatch, not match with `$`: `$` also matches
+# before a trailing newline.
+LEVEL_RE = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+MACHINE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+DEVICE_ID_RE = re.compile(r"[0-9a-f]{8}")
+KEYS = {"Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BSpace",
+        *"0123456789", "y", "n"}
+
+# Pairing codes: no 0/O, 1/I/L, so a code read off a terminal types back right.
+CODE_ALPHABET = "ABCDEFGHJKMNPQRSTUVWXYZ23456789"
+CODE_LEN = 8
+CODE_TTL = 600
+# Failed pairs: per client address, and over all addresses, so many addresses
+# together cannot walk the code space either.
+PAIR_WINDOW = 600
+PAIR_FAILS = 5
+PAIR_FAILS_ALL = 50
+
+MAX_BODY = 256 * 1024
+PING = 25
+DEBOUNCE = 0.3
+MAX_STREAMS = 32
+# A device's last_seen is written at most this often, not on every request.
+SEEN_EVERY = 60
+# Peers are asked whether they answer this often, for machines with no agents.
+PEER_EVERY = 120
+# StopFailure errors roster revives by itself (TRANSIENT in bin/roster); the
+# others need the user.
+TRANSIENT = ("rate_limit", "overloaded", "server_error", "unknown")
+FINISHED_AFTER = 60
+ENDED = ("gone", "left")
+
+
+class Fail(Exception):
+    pass
+
+
+class HttpError(Exception):
+    """An answer other than 200, with `{"error": message}` as its body."""
+
+    def __init__(self, status, message, headers=None):
+        super().__init__(message)
+        self.status, self.message, self.headers = status, message, headers or {}
+
+
+def log(msg):
+    print("roster-hub: %s" % msg, file=sys.stderr, flush=True)
+
+
+def now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S%z")
+
+
+def sha(text):
+    return hashlib.sha256(text.encode()).hexdigest()
+
+
+# --- config and storage ----------------------------------------------------
+
+
+def config():
+    """hub.toml over the defaults."""
+    try:
+        with open(CONFIG, "rb") as f:
+            got = tomllib.load(f)
+    except FileNotFoundError:
+        got = {}
+    except (OSError, ValueError) as exc:
+        raise Fail("%s: %s" % (CONFIG, exc))
+    cfg = dict(DEFAULTS, **got)
+    if isinstance(cfg["push_allowed"], str):
+        cfg["push_allowed"] = [cfg["push_allowed"]]
+    return cfg
+
+
+def listen_address(text):
+    """(host, port) from `host:port`, refusing any address that could be public.
+
+    The hub speaks plain HTTP and trusts X-Forwarded-For, so only the proxy may
+    reach it. An IP literal (or localhost), never a wildcard or a global one.
+    """
+    m = re.fullmatch(r"\[([0-9A-Fa-f:.]+)\]:(\d+)|([^:\[\]]+):(\d+)", text or "")
+    if not m:
+        raise Fail("listen %r: want host:port, or [v6]:port" % text)
+    host, port = (m.group(1), m.group(2)) if m.group(1) else (m.group(3), m.group(4))
+    if host == "localhost":
+        host = "127.0.0.1"
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        raise Fail("listen %r: the host must be an IP address" % text)
+    if ip.is_unspecified or ip.is_global or ip.is_multicast:
+        raise Fail("listen %r: refusing a public or wildcard address; the proxy does the public side" % text)
+    port = int(port)
+    if not 0 < port < 65536:
+        raise Fail("listen %r: bad port" % text)
+    return str(ip), port
+
+
+def write_atomic(path, text):
+    """Temp file renamed into place. mkstemp makes it 0600, which the token hashes need."""
+    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path), prefix=".tmp.")
+    with os.fdopen(fd, "w") as f:
+        os.fchmod(f.fileno(), 0o600)
+        f.write(text)
+    os.replace(tmp, path)
+
+
+def read_json(path, default):
+    try:
+        with open(path) as f:
+            return json.load(f)
+    except FileNotFoundError:
+        return default
+    except (OSError, ValueError) as exc:
+        raise Fail("%s: %s" % (path, exc))
+
+
+@contextlib.contextmanager
+def locked():
+    """Exclusive across processes and threads: each holder opens the lock file anew."""
+    os.makedirs(STATE, mode=0o700, exist_ok=True)
+    fd = os.open(LOCK, os.O_WRONLY | os.O_CREAT | os.O_CLOEXEC, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
+def load_devices():
+    return read_json(DEVICES, {"devices": []}).get("devices", [])
+
+
+def save_devices(devices):
+    write_atomic(DEVICES, json.dumps({"devices": devices}, indent=2) + "\n")
+
+
+def load_codes():
+    return [c for c in read_json(CODES, {"codes": []}).get("codes", []) if c.get("expires", 0) > time.time()]
+
+
+def save_codes(codes):
+    write_atomic(CODES, json.dumps({"codes": codes}, indent=2) + "\n")
+
+
+def new_code(name):
+    """A one-time pairing code, valid CODE_TTL seconds. Only its hash is kept."""
+    code = "".join(secrets.choice(CODE_ALPHABET) for _ in range(CODE_LEN))
+    with locked():
+        codes = load_codes()
+        codes.append({"sha256": sha(code), "name": name, "expires": int(time.time()) + CODE_TTL})
+        save_codes(codes)
+    return code
+
+
+def redeem(code, device_name):
+    """Use up a code and make a device for it: (token, device_id), or None."""
+    code = re.sub(r"[\s-]", "", code).upper()
+    if not re.fullmatch("[%s]{%d}" % (CODE_ALPHABET, CODE_LEN), code):
+        return None
+    digest = sha(code)
+    with locked():
+        codes = load_codes()
+        hit = None
+        for c in codes:
+            if hmac.compare_digest(c["sha256"], digest):
+                hit = c
+        if hit is None:
+            return None
+        codes.remove(hit)
+        save_codes(codes)
+        devices = load_devices()
+        token = secrets.token_urlsafe(32)
+        ids = {d["id"] for d in devices}
+        dev_id = secrets.token_hex(4)
+        while dev_id in ids:
+            dev_id = secrets.token_hex(4)
+        devices.append({"id": dev_id, "name": hit.get("name") or device_name or "phone",
+                        "token_sha256": sha(token), "created": now(), "last_seen": now(), "push": None})
+        save_devices(devices)
+    return token, dev_id
+
+
+def device_for(token):
+    """The device whose token this is, or None. Every stored hash is compared, in constant time."""
+    if not token or len(token) > 256:
+        return None
+    digest = sha(token)
+    found = None
+    for d in load_devices():
+        if hmac.compare_digest(d.get("token_sha256", ""), digest):
+            found = d
+    return found
+
+
+def update_device(dev_id, **fields):
+    """Set fields on one device; False when it is gone (revoked meanwhile)."""
+    with locked():
+        devices = load_devices()
+        for d in devices:
+            if d["id"] == dev_id:
+                d.update(fields)
+                save_devices(devices)
+                return True
+    return False
+
+
+def remove_device(dev_id):
+    with locked():
+        devices = load_devices()
+        keep = [d for d in devices if d["id"] != dev_id]
+        if len(keep) == len(devices):
+            return False
+        save_devices(keep)
+    return True
+
+
+def device_rows(current=None):
+    return [{"id": d["id"], "name": d.get("name"), "created": d.get("created"),
+             "last_seen": d.get("last_seen"), "push": bool(d.get("push")),
+             "current": d["id"] == current} for d in load_devices()]
+
+
+# --- the roster CLI ----------------------------------------------------------
+
+
+def roster_bin():
+    return os.environ.get("ROSTER_BIN") or os.path.expanduser("~/.local/bin/roster")
+
+
+def cli(*args, stdin=None, timeout=20, as_json=False):
+    """Run `roster ARGS`; its stdout, or its JSON. Never through a shell.
+
+    Exit 1 with `roster: reason` is the CLI saying no: a 400 carrying that
+    reason. Anything else (a crash, a timeout) is the hub's problem: 502/504,
+    with the details in the journal only.
+    """
+    argv = [roster_bin(), *args]
+    try:
+        proc = subprocess.run(argv, input=stdin, stdin=subprocess.DEVNULL if stdin is None else None,
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise HttpError(504, "roster %s did not answer within %ds" % (args[0], timeout))
+    except OSError as exc:
+        log("cannot run %s: %s" % (argv[0], exc))
+        raise HttpError(502, "cannot run roster")
+    if proc.returncode != 0:
+        lines = [l for l in proc.stderr.splitlines() if l.strip()]
+        if proc.returncode == 1 and lines and lines[-1].startswith("roster: "):
+            raise HttpError(400, lines[-1][len("roster: "):])
+        log("roster %s exited %d: %s" % (args[0], proc.returncode, proc.stderr.strip()[-2000:]))
+        raise HttpError(502, "roster %s failed (exit %d)" % (args[0], proc.returncode))
+    if not as_json:
+        return proc.stdout
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        log("roster %s gave no JSON: %r" % (args[0], proc.stdout[:500]))
+        raise HttpError(502, "roster %s gave no JSON" % args[0])
+
+
+def stamp(text):
+    """Seconds since the epoch from a roster timestamp, or None."""
+    try:
+        return datetime.strptime(text, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+# --- request checks ----------------------------------------------------------
+
+
+def check_agent(value):
+    """`name@machine`, as the CLI would accept it, before it reaches the CLI.
+
+    The name starts with [a-z0-9], so the argument can never pass for an option.
+    """
+    if not isinstance(value, str) or "@" not in value or len(value) > 400:
+        raise HttpError(400, "agent must be name@machine")
+    name, mach = value.rsplit("@", 1)
+    if not all(LEVEL_RE.fullmatch(lvl) for lvl in name.split("/")) or not MACHINE_RE.fullmatch(mach):
+        raise HttpError(400, "bad agent %r: levels match [a-z0-9][a-z0-9_-]{0,31}, separated by /, then @machine" % value[:100])
+    return value
+
+
+def check_text(value, what, limit, oneline=False, required=False):
+    """A string without NULs (and without control characters at all when one line)."""
+    if value is None and not required:
+        return None
+    if not isinstance(value, str) or (required and not value.strip()):
+        raise HttpError(400, "%s must be a non-empty string" % what if required else "%s must be a string" % what)
+    if len(value) > limit or "\0" in value:
+        raise HttpError(400, "%s is too long or holds a NUL" % what)
+    if oneline and any(ord(c) < 32 or ord(c) == 127 for c in value):
+        raise HttpError(400, "%s must be one line" % what)
+    return value
+
+
+def check_int(value, what, lo, hi):
+    try:
+        n = int(value)
+    except (TypeError, ValueError):
+        raise HttpError(400, "%s must be an integer" % what)
+    if not lo <= n <= hi:
+        raise HttpError(400, "%s must be between %d and %d" % (what, lo, hi))
+    return n
+
+
+def check_endpoint(value, allowed):
+    """A UnifiedPush endpoint on an allowed push server: it is sent the ntfy token."""
+    if value is None:
+        return None
+    if not isinstance(value, str) or len(value) > 2048 or any(ord(c) <= 32 or ord(c) == 127 for c in value):
+        raise HttpError(400, "endpoint must be a URL")
+    url = urllib.parse.urlsplit(value)
+    if url.scheme not in ("https", "http") or not url.hostname or url.username or url.password:
+        raise HttpError(400, "endpoint must be an http(s) URL")
+    if not any(value.startswith(p) for p in allowed):
+        raise HttpError(400, "endpoint must be on the hub's push server (%s)" % ", ".join(allowed))
+    return value
+
+
+class Limiter:
+    """Failed pair attempts in the last PAIR_WINDOW seconds, per address and overall."""
+
+    def __init__(self):
+        self.lock = threading.Lock()
+        self.fails = {}
+        self.all = deque()
+
+    def _prune(self):
+        cut = time.monotonic() - PAIR_WINDOW
+        while self.all and self.all[0] < cut:
+            self.all.popleft()
+        for addr in list(self.fails):
+            q = self.fails[addr]
+            while q and q[0] < cut:
+                q.popleft()
+            if not q:
+                del self.fails[addr]
+
+    def blocked(self, addr):
+        with self.lock:
+            self._prune()
+            return len(self.fails.get(addr, ())) >= PAIR_FAILS or len(self.all) >= PAIR_FAILS_ALL
+
+    def fail(self, addr):
+        with self.lock:
+            t = time.monotonic()
+            self.fails.setdefault(addr, deque()).append(t)
+            self.all.append(t)
+
+
+# --- the hub: agent snapshots, the event stream, pushes ---------------------
+
+
+class NoRedirect(urllib.request.HTTPRedirectHandler):
+    """A redirect would carry the ntfy token to wherever it points; treat it as an error."""
+
+    def redirect_request(self, *args, **kwargs):
+        return None
+
+
+def needs_you(row):
+    st = row.get("stalled")
+    return bool(st) and bool(st.get("gave_up") or st.get("error") not in TRANSIENT)
+
+
+class Hub:
+    def __init__(self, cfg):
+        self.cfg = cfg
+        self.lock = threading.Lock()
+        self.snapshot = None       # the last /v1/agents answer, as a dict
+        self.snapshot_text = None  # and as sent
+        self.event_id = 0
+        self.streams = set()
+        self.wake = threading.Event()
+        self.limiter = Limiter()
+        self.local = None          # this machine's roster name
+        self.peer_state = {}       # machine -> (reachable, error), from `roster peer list`
+        self.working_since = {}    # agent -> when the hub first saw it working
+        self.pushes = queue.Queue(maxsize=256)
+        self.no_token_logged = False
+        self.events_proc = None
+
+    # machines
+
+    def local_machine(self):
+        if self.local is None:
+            try:
+                m = re.search(r" on (\S+)\s*$", cli("version", timeout=10))
+                if m and MACHINE_RE.fullmatch(m.group(1)):
+                    self.local = m.group(1)
+            except HttpError as exc:
+                log("roster version: %s" % exc.message)
+        return self.local
+
+    def refresh_peers(self):
+        """Every peer and whether it answers, so a machine with no agents is listed too."""
+        out = cli("peer", "list", timeout=90)
+        state = {}
+        for line in out.splitlines():
+            parts = line.split(None, 2)
+            if len(parts) == 3 and MACHINE_RE.fullmatch(parts[0]) and not line.startswith("no peers"):
+                ok = parts[2].startswith("roster ")
+                state[parts[0]] = (ok, None if ok else parts[2])
+        if state != self.peer_state:
+            self.peer_state = state
+            self.wake.set()
+
+    def machines(self, rows):
+        """This machine first, then each peer. Fresh rows prove a peer answers; stale ones say why not."""
+        local = self.local_machine() or next((r.get("machine") for r in rows if r.get("local")), None)
+        names = sorted((set(self.peer_state) | {r.get("machine") for r in rows if not r.get("local")}) - {None, local})
+        out = [{"name": local, "local": True, "reachable": True, "error": None}] if local else []
+        for m in names:
+            mine = [r for r in rows if r.get("machine") == m]
+            stale = next((r["stale"] for r in mine if r.get("stale")), None)
+            if stale:
+                ok, err = False, stale
+            elif mine:
+                ok, err = True, None
+            else:
+                ok, err = self.peer_state.get(m, (True, None))
+            out.append({"name": m, "local": False, "reachable": ok, "error": err})
+        return out
+
+    # snapshots
+
+    def agents(self, all_=False):
+        rows = cli("list", "--json", *(["--all"] if all_ else []), timeout=45, as_json=True)
+        if not isinstance(rows, list):
+            raise HttpError(502, "roster list gave no list")
+        for r in rows:
+            r["agent"] = "%s@%s" % (r.get("name"), r.get("machine"))
+        return {"agents": rows, "machines": self.machines(rows)}
+
+    def current(self):
+        """The latest snapshot and its event id; made now when there is none yet."""
+        with self.lock:
+            if self.snapshot_text is not None:
+                return self.snapshot_text, self.event_id
+        self.publish(self.agents())
+        with self.lock:
+            return self.snapshot_text, self.event_id
+
+    def publish(self, payload):
+        """Take a new snapshot; when it differs, send it to every stream and derive pushes."""
+        text = json.dumps(payload, sort_keys=True, ensure_ascii=False)
+        with self.lock:
+            if text == self.snapshot_text:
+                return
+            prev = self.snapshot
+            self.snapshot, self.snapshot_text = payload, text
+            self.event_id += 1
+            eid = self.event_id
+            streams = list(self.streams)
+        for q in streams:
+            try:
+                q.put_nowait(("agents", eid, text))
+            except queue.Full:
+                pass  # that stream is stuck; it ends at its next ping
+        self.derive_pushes(prev, payload)
+
+    def follow_events(self):
+        """`roster events --all`, restarted whenever it ends; every line wakes the refresher."""
+        delay = 2
+        while True:
+            started = time.monotonic()
+            try:
+                self.events_proc = subprocess.Popen([roster_bin(), "events", "--all"], stdin=subprocess.DEVNULL,
+                                                    stdout=subprocess.PIPE, text=True)
+                for line in self.events_proc.stdout:
+                    if line.strip() in ("ready", "change", "tick"):
+                        self.wake.set()
+                self.events_proc.wait()
+                log("roster events ended (exit %s); restarting" % self.events_proc.returncode)
+            except OSError as exc:
+                log("cannot run roster events: %s" % exc)
+            if time.monotonic() - started > 60:
+                delay = 2
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+
+    def refresher(self):
+        """Re-list on every wake (debounced) and at least once a minute, in case the events stream is down."""
+        while True:
+            self.wake.wait(timeout=60)
+            time.sleep(DEBOUNCE)  # a send or a status write is a burst of changes
+            self.wake.clear()
+            try:
+                self.publish(self.agents())
+            except HttpError as exc:
+                log("roster list: %s" % exc.message)
+                time.sleep(5)
+            except Exception:
+                log("refresh failed:\n%s" % traceback.format_exc())
+                time.sleep(5)
+
+    def peer_watcher(self):
+        while True:
+            try:
+                self.refresh_peers()
+            except HttpError as exc:
+                log("roster peer list: %s" % exc.message)
+            time.sleep(PEER_EVERY)
+
+    # pushes
+
+    def push_token(self):
+        path = os.path.expanduser(self.cfg["push_token_file"])
+        try:
+            with open(path) as f:
+                token = f.read().strip()
+        except OSError:
+            token = ""
+        if not token:
+            if not self.no_token_logged:
+                log("no push token in %s; not sending pushes" % path)
+                self.no_token_logged = True
+            return None
+        self.no_token_logged = False
+        return token
+
+    def derive_pushes(self, prev, cur):
+        """Turn the step from one snapshot to the next into pushes: blocked, finished, needs you."""
+        t = time.time()
+        rows = {r["agent"]: r for r in cur["agents"]}
+        for a, r in rows.items():
+            if r.get("status") == "working":
+                self.working_since.setdefault(a, t)
+        if prev is None:
+            return
+        before = {r["agent"]: r for r in prev["agents"]}
+        for a, r in rows.items():
+            p = before.get(a)
+            if p is None or r.get("stale") or r.get("status") in ENDED:
+                continue
+            kind, took = None, None
+            if needs_you(r) and not needs_you(p):
+                kind = "error"
+            elif r.get("status") == "blocked" and p.get("status") != "blocked":
+                kind = "blocked"
+            elif p.get("status") == "working" and r.get("status") in ("idle", "done") and not r.get("stalled"):
+                start = stamp(p.get("status_at")) or self.working_since.get(a)
+                end = stamp(r.get("status_at")) or t
+                if start is not None and end - start >= FINISHED_AFTER:
+                    kind, took = "finished", end - start
+            if kind:
+                try:
+                    self.pushes.put_nowait((kind, r, took))
+                except queue.Full:
+                    log("push queue full; dropping a %s push" % kind)
+        for a in list(self.working_since):
+            if rows.get(a, {}).get("status") != "working":
+                del self.working_since[a]
+
+    def message(self, kind, row, took):
+        """The push body. Looks at the screen or the transcript for a line worth reading; falls back to the role."""
+        agent = row["agent"]
+        if kind == "error":
+            st = row.get("stalled") or {}
+            how = "gave up resuming" if st.get("gave_up") else "needs you"
+            body = "%s; %s" % (st.get("error"), how)
+            if st.get("message"):
+                body += ": " + st["message"]
+            return {"type": "error", "agent": agent, "title": "%s: API error" % agent, "body": body[:300]}
+        if kind == "blocked":
+            body = None
+            try:
+                dialog = (cli("screen", agent, "--json", timeout=15, as_json=True) or {}).get("dialog")
+                body = (dialog or {}).get("title")
+            except (HttpError, AttributeError):
+                pass
+            return {"type": "blocked", "agent": agent, "title": "%s needs you" % agent,
+                    "body": (body or row.get("role") or "waiting for an answer")[:300]}
+        body = None
+        try:
+            got = cli("transcript", agent, "--limit", "20", "--json", timeout=15, as_json=True)
+            texts = [m.get("text") for m in got.get("messages", []) if m.get("role") == "assistant" and m.get("text")]
+            body = texts[-1] if texts else None
+        except (HttpError, AttributeError):
+            pass
+        mins = int((took or 0) // 60)
+        return {"type": "finished", "agent": agent, "title": "%s finished after %d min" % (agent, mins),
+                "body": (body or row.get("role") or "its turn ended")[:300]}
+
+    def pusher(self):
+        while True:
+            kind, row, took = self.pushes.get()
+            try:
+                devices = [d for d in load_devices() if d.get("push")]
+                if not devices:
+                    continue
+                token = self.push_token()
+                if token is None:
+                    continue
+                msg = json.dumps(self.message(kind, row, took)).encode()
+                for d in devices:
+                    self.send_push(d, token, msg)
+            except Exception:
+                log("push failed:\n%s" % traceback.format_exc())
+
+    def send_push(self, device, token, msg):
+        endpoint = device["push"]
+        if not any(endpoint.startswith(p) for p in self.cfg["push_allowed"]):
+            log("device %s: push endpoint no longer allowed; skipped" % device["id"])
+            return
+        req = urllib.request.Request(endpoint, data=msg, method="POST", headers={
+            "Authorization": "Bearer " + token, "Content-Type": "application/json"})
+        try:
+            urllib.request.build_opener(NoRedirect).open(req, timeout=10).close()
+        except urllib.error.HTTPError as exc:
+            if exc.code in (404, 410):
+                # UnifiedPush: the endpoint is gone; the app registers a new one when it runs.
+                update_device(device["id"], push=None)
+                log("device %s: push endpoint gone (%d); dropped it" % (device["id"], exc.code))
+            else:
+                log("device %s: push answered %d" % (device["id"], exc.code))
+        except (OSError, ValueError) as exc:
+            log("device %s: push failed: %s" % (device["id"], exc))
+
+    def start(self):
+        for fn in (self.follow_events, self.refresher, self.peer_watcher, self.pusher):
+            threading.Thread(target=fn, daemon=True, name=fn.__name__).start()
+
+
+# --- HTTP --------------------------------------------------------------------
+
+
+class Server(http.server.ThreadingHTTPServer):
+    daemon_threads = True
+    hub = None
+
+
+class Handler(http.server.BaseHTTPRequestHandler):
+    server_version = "roster-hub/" + VERSION
+    sys_version = ""
+    timeout = 60  # a client that stalls mid-request does not hold a thread forever
+
+    # Routes: (method, path) -> (method name, needs a device token).
+    ROUTES = {
+        ("GET", "/v1/version"): ("version", False),
+        ("POST", "/v1/pair"): ("pair", False),
+        ("GET", "/v1/agents"): ("agents", True),
+        ("GET", "/v1/transcript"): ("transcript", True),
+        ("GET", "/v1/screen"): ("screen", True),
+        ("POST", "/v1/prompt"): ("prompt", True),
+        ("POST", "/v1/keys"): ("keys", True),
+        ("POST", "/v1/new"): ("new", True),
+        ("POST", "/v1/resume"): ("resume", True),
+        ("POST", "/v1/kill"): ("kill", True),
+        ("POST", "/v1/push"): ("push", True),
+        ("GET", "/v1/devices"): ("devices", True),
+        ("DELETE", "/v1/devices/*"): ("delete_device", True),
+        ("GET", "/v1/events"): ("events", True),
+    }
+
+    def do_GET(self):
+        self.dispatch("GET")
+
+    def do_POST(self):
+        self.dispatch("POST")
+
+    def do_DELETE(self):
+        self.dispatch("DELETE")
+
+    def do_PUT(self):
+        self.dispatch("PUT")
+
+    def do_PATCH(self):
+        self.dispatch("PATCH")
+
+    @property
+    def hub(self):
+        return self.server.hub
+
+    def client(self):
+        """The client's address: the last X-Forwarded-For entry, which our proxy added, else the socket's."""
+        fwd = self.headers.get("X-Forwarded-For", "")
+        last = fwd.split(",")[-1].strip() if fwd else ""
+        return last[:64] or self.client_address[0]
+
+    def log_request(self, code="-", size="-"):
+        # The path without its query, and never a header: the token is in one.
+        path = urllib.parse.urlsplit(self.path).path[:200]
+        self.log_message("%s %s %s %s", self.client(), self.command, path, code)
+
+    def log_message(self, fmt, *args):
+        log(fmt % args)
+
+    def answer(self, status, obj, headers=None):
+        data = (json.dumps(obj, ensure_ascii=False) + "\n").encode()
+        self.send_response(status)
+        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        for k, v in (headers or {}).items():
+            self.send_header(k, v)
+        self.end_headers()
+        self.wfile.write(data)
+
+    def dispatch(self, method):
+        self.close_connection = True
+        try:
+            url = urllib.parse.urlsplit(self.path)
+            self.query = urllib.parse.parse_qs(url.query)
+            path = url.path
+            self.path_id = None
+            if path.startswith("/v1/devices/"):
+                self.path_id, path = path[len("/v1/devices/"):], "/v1/devices/*"
+            route = self.ROUTES.get((method, path))
+            if route is None:
+                if any(p == path for _, p in self.ROUTES):
+                    raise HttpError(405, "method not allowed")
+                raise HttpError(404, "not found")
+            name, auth = route
+            length = self.body_length(method)
+            self.device = None
+            if auth:
+                self.device = self.authorize()
+            self.body = self.read_body(length)
+            result = getattr(self, "r_" + name)()
+            if result is not None:
+                self.answer(200, result)
+        except HttpError as exc:
+            self.answer(exc.status, {"error": exc.message}, exc.headers)
+        except (BrokenPipeError, ConnectionResetError):
+            pass
+        except Exception:
+            log("internal error:\n%s" % traceback.format_exc())
+            try:
+                self.answer(500, {"error": "internal error"})
+            except OSError:
+                pass
+
+    def body_length(self, method):
+        """Checked before anything is read: a body too big is refused unread."""
+        if self.headers.get("Transfer-Encoding"):
+            raise HttpError(411, "send a Content-Length, not a chunked body")
+        try:
+            length = int(self.headers.get("Content-Length") or 0)
+        except ValueError:
+            raise HttpError(400, "bad Content-Length")
+        if length < 0:
+            raise HttpError(400, "bad Content-Length")
+        if length > MAX_BODY:
+            raise HttpError(413, "body over %d KiB" % (MAX_BODY // 1024))
+        if method == "POST" and not length:
+            raise HttpError(400, "a JSON body is needed")
+        return length
+
+    def read_body(self, length):
+        if not length:
+            return {}
+        try:
+            body = json.loads(self.rfile.read(length))
+        except (ValueError, UnicodeDecodeError):
+            raise HttpError(400, "the body is not JSON")
+        if not isinstance(body, dict):
+            raise HttpError(400, "the body must be a JSON object")
+        return body
+
+    def authorize(self):
+        header = self.headers.get("Authorization", "")
+        scheme, _, token = header.partition(" ")
+        dev = device_for(token.strip()) if scheme.lower() == "bearer" else None
+        if dev is None:
+            raise HttpError(401, "a valid device token is needed", {"WWW-Authenticate": "Bearer"})
+        seen = stamp(dev.get("last_seen"))
+        if seen is None or time.time() - seen > SEEN_EVERY:
+            update_device(dev["id"], last_seen=now())
+        return dev
+
+    def arg(self, key):
+        got = self.query.get(key)
+        return got[-1] if got else None
+
+    # endpoints
+
+    def r_version(self):
+        return {"hub": VERSION, "api": API}
+
+    def r_pair(self):
+        addr = self.client()
+        if self.hub.limiter.blocked(addr):
+            raise HttpError(429, "too many failed attempts; try again later", {"Retry-After": str(PAIR_WINDOW)})
+        code = self.body.get("code")
+        name = check_text(self.body.get("device_name"), "device_name", 64, oneline=True)
+        got = redeem(code, name) if isinstance(code, str) and len(code) <= 32 else None
+        if got is None:
+            self.hub.limiter.fail(addr)
+            log("failed pair from %s" % addr)
+            raise HttpError(403, "wrong or expired code")
+        log("paired device %s from %s" % (got[1], addr))
+        return {"token": got[0], "device_id": got[1]}
+
+    def r_agents(self):
+        if self.arg("all") in ("1", "true", "yes"):
+            return self.hub.agents(all_=True)
+        text, _ = self.hub.current()
+        return json.loads(text)
+
+    def r_transcript(self):
+        args = ["transcript", check_agent(self.arg("agent"))]
+        if self.arg("after") is not None:
+            args += ["--after", str(check_int(self.arg("after"), "after", -1, 10 ** 9))]
+        if self.arg("limit") is not None:
+            args += ["--limit", str(check_int(self.arg("limit"), "limit", 1, 1000))]
+        return cli(*args, "--json", timeout=30, as_json=True)
+
+    def r_screen(self):
+        return cli("screen", check_agent(self.arg("agent")), "--json", timeout=20, as_json=True)
+
+    def r_prompt(self):
+        agent = check_agent(self.body.get("agent"))
+        text = check_text(self.body.get("text"), "text", 64 * 1024, required=True)
+        cli("prompt", agent, "-", stdin=text, timeout=20)
+        self.hub.wake.set()
+        return {"ok": True}
+
+    def r_keys(self):
+        agent = check_agent(self.body.get("agent"))
+        keys = self.body.get("keys")
+        if not isinstance(keys, list) or not 1 <= len(keys) <= 32:
+            raise HttpError(400, "keys must be a list of 1 to 32 keys")
+        for k in keys:
+            if not isinstance(k, str) or k not in KEYS:
+                raise HttpError(400, "key %r is not allowed; allowed: %s" % (
+                    str(k)[:20], " ".join(sorted(KEYS, key=lambda x: (len(x) == 1, x)))))
+        cli("keys", agent, *keys, timeout=20)
+        self.hub.wake.set()
+        return {"ok": True}
+
+    def r_new(self):
+        b = self.body
+        mach = b.get("machine")
+        if not isinstance(mach, str) or not MACHINE_RE.fullmatch(mach):
+            raise HttpError(400, "machine must be a roster machine name")
+        args = ["new", "--on=" + mach, "--no-attach"]
+        name = check_text(b.get("name"), "name", 400, oneline=True) or None
+        if name is not None:
+            if not all(LEVEL_RE.fullmatch(lvl) for lvl in name.split("/")):
+                raise HttpError(400, "bad name %r: levels match [a-z0-9][a-z0-9_-]{0,31}, separated by /" % name[:100])
+            args.append("--name=" + name)
+        role = check_text(b.get("role"), "role", 300, oneline=True) or None
+        if role is not None:
+            args.append("--role=" + role)
+        prompt = check_text(b.get("prompt"), "prompt", 64 * 1024) or None
+        if prompt is not None:
+            args.append("--prompt=-")
+        cwd = check_text(b.get("cwd"), "cwd", 4096, oneline=True) or None
+        if cwd is not None:
+            args += ["--", cwd]  # after --, a cwd starting with - is still a path
+        out = cli(*args, stdin=prompt, timeout=90)
+        m = re.search(r"^started (\S+) in ", out, re.M)
+        if not m:
+            log("roster new said: %r" % out[:500])
+            raise HttpError(502, "roster new did not say what it started")
+        agent = m.group(1) if "@" in m.group(1) else "%s@%s" % (m.group(1), mach)
+        self.hub.wake.set()
+        return {"agent": agent}
+
+    def r_resume(self):
+        cli("resume", check_agent(self.body.get("agent")), "--no-attach", timeout=90)
+        self.hub.wake.set()
+        return {"ok": True}
+
+    def r_kill(self):
+        cli("kill", check_agent(self.body.get("agent")), timeout=30)
+        self.hub.wake.set()
+        return {"ok": True}
+
+    def r_push(self):
+        if "endpoint" not in self.body:
+            raise HttpError(400, "endpoint is needed (null to stop pushes)")
+        endpoint = check_endpoint(self.body["endpoint"], self.hub.cfg["push_allowed"])
+        if not update_device(self.device["id"], push=endpoint):
+            raise HttpError(401, "this device was revoked")
+        return {"ok": True}
+
+    def r_devices(self):
+        return {"devices": device_rows(self.device["id"])}
+
+    def r_delete_device(self):
+        if not DEVICE_ID_RE.fullmatch(self.path_id or ""):
+            raise HttpError(404, "no such device")
+        if not remove_device(self.path_id):
+            raise HttpError(404, "no such device")
+        log("device %s revoked by device %s" % (self.path_id, self.device["id"]))
+        return {"ok": True}
+
+    def r_events(self):
+        """Server-Sent Events: the snapshot now, then each one that differs, and a ping every PING seconds."""
+        hub = self.hub
+        q = queue.Queue(maxsize=16)
+        with hub.lock:
+            if len(hub.streams) >= MAX_STREAMS:
+                raise HttpError(503, "too many event streams")
+            hub.streams.add(q)
+        try:
+            text, eid = hub.current()
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream; charset=utf-8")
+            self.send_header("Cache-Control", "no-store")
+            self.send_header("X-Accel-Buffering", "no")  # nginx: do not hold events back
+            self.end_headers()
+            self.send_event("agents", eid, text)
+            while True:
+                try:
+                    event, eid, text = q.get(timeout=PING)
+                except queue.Empty:
+                    if q.full() or not any(d["id"] == self.device["id"] for d in load_devices()):
+                        return None  # stuck, or revoked meanwhile
+                    with hub.lock:
+                        eid = hub.event_id
+                    event, text = "ping", "{}"
+                self.send_event(event, eid, text)
+        except OSError:
+            return None  # the client went away
+        finally:
+            with hub.lock:
+                hub.streams.discard(q)
+
+    def send_event(self, event, eid, text):
+        data = "".join("data: %s\n" % line for line in text.split("\n"))
+        self.wfile.write(("event: %s\nid: %d\n%s\n" % (event, eid, data)).encode())
+        self.wfile.flush()
+
+
+# --- commands ----------------------------------------------------------------
+
+
+def cmd_serve(args):
+    cfg = config()
+    host, port = listen_address(cfg["listen"])
+    hub = Hub(cfg)
+    Server.address_family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    try:
+        server = Server((host, port), Handler)
+    except OSError as exc:
+        raise Fail("cannot listen on %s: %s" % (cfg["listen"], exc))
+    server.hub = hub
+    hub.start()
+
+    def stop(*_):
+        raise SystemExit(0)
+    signal.signal(signal.SIGTERM, stop)
+    log("%s listening on %s:%d (public %s)" % (VERSION, host, port, cfg["public_url"]))
+    try:
+        server.serve_forever()
+    except KeyboardInterrupt:
+        pass
+    finally:
+        proc = hub.events_proc
+        if proc and proc.poll() is None:
+            proc.terminate()
+        server.server_close()
+
+
+def cmd_pair(args):
+    name = args.name
+    if name is not None:
+        name = name.strip()
+        if not name or len(name) > 64 or any(ord(c) < 32 for c in name):
+            raise Fail("--name: one line, at most 64 characters")
+    code = new_code(name)
+    url = config()["public_url"]
+    if args.json:
+        print(json.dumps({"code": code, "url": url, "expires_in": CODE_TTL}))
+        return
+    print("code  %s\nhub   %s\n\nValid for %d minutes, once. Enter both in the roster app." % (code, url, CODE_TTL // 60))
+
+
+def cmd_devices(args):
+    rows = device_rows()
+    if args.json:
+        print(json.dumps(rows, indent=2))
+        return
+    if not rows:
+        print("no devices; pair one with `roster-hub pair`")
+        return
+    for d in rows:
+        print("%-9s %-24s created %s  seen %s  %s" % (d["id"], d["name"], d["created"], d["last_seen"],
+                                                      "push" if d["push"] else "no push"))
+
+
+def cmd_revoke(args):
+    if not remove_device(args.id):
+        raise Fail("no device %s (roster-hub devices)" % args.id)
+    print("revoked %s" % args.id)
+
+
+def main():
+    p = argparse.ArgumentParser(prog="roster-hub", description="The roster's JSON API and event stream, for phones.")
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    s = sub.add_parser("serve", help="run the hub (roster-hub.service does this)")
+    s.set_defaults(fn=cmd_serve)
+
+    s = sub.add_parser("pair", help="print a one-time code for pairing a phone")
+    s.add_argument("--name", help="the device's name (default: what the app sends)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_pair)
+
+    s = sub.add_parser("devices", help="list paired devices")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_devices)
+
+    s = sub.add_parser("revoke", help="remove a paired device; its token stops working at once")
+    s.add_argument("id")
+    s.set_defaults(fn=cmd_revoke)
+
+    s = sub.add_parser("version", help="print roster-hub's version")
+    s.set_defaults(fn=lambda args: print("roster-hub %s (api %d)" % (VERSION, API)))
+
+    args = p.parse_args()
+    try:
+        args.fn(args)
+    except Fail as exc:
+        print("roster-hub: %s" % exc, file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
