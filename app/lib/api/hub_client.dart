@@ -104,10 +104,11 @@ class HubClient {
   Future<AgentsSnapshot> agents({bool all = false}) async =>
       AgentsSnapshot.fromJson(await _send('GET', '/v1/agents', query: all ? {'all': '1'} : null));
 
-  Future<TranscriptPage> transcript(String agent, {int? after, int? limit}) async =>
+  Future<TranscriptPage> transcript(String agent, {int? after, int? before, int? limit}) async =>
       TranscriptPage.fromJson(await _send('GET', '/v1/transcript', query: {
         'agent': agent,
         if (after != null) 'after': '$after',
+        if (before != null) 'before': '$before',
         if (limit != null) 'limit': '$limit',
       }));
 

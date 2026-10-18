@@ -889,6 +889,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
         args = ["transcript", check_agent(self.arg("agent"))]
         if self.arg("after") is not None:
             args += ["--after", str(check_int(self.arg("after"), "after", -1, 10 ** 9))]
+        if self.arg("before") is not None:
+            args += ["--before", str(check_int(self.arg("before"), "before", 1, 10 ** 9))]
         if self.arg("limit") is not None:
             args += ["--limit", str(check_int(self.arg("limit"), "limit", 1, 1000))]
         return cli(*args, "--json", timeout=30, as_json=True)

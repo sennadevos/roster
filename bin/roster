@@ -2025,11 +2025,13 @@ def block_text(content):
     return ""
 
 
-def read_transcript(session_id, after=None, limit=200):
+def read_transcript(session_id, after=None, limit=200, before=None):
     """The conversation as messages: user and assistant texts, and tool calls with their results.
 
-    `i` is the line in the JSONL. With `after`, only what came later, plus any
-    earlier tool call whose result only arrived later (same `i`, to merge).
+    `i` is the line in the JSONL (from 1). With `after`, the first `limit`
+    messages that came later, plus any earlier tool call whose result only
+    arrived later (same `i`, to merge). With `before`, the last `limit` messages
+    before that line, for scrolling back. With neither, the last `limit`.
     """
     messages, tools, updated, last = [], {}, set(), 0
     with open(transcript_path(session_id)) as f:
@@ -2070,7 +2072,10 @@ def read_transcript(session_id, after=None, limit=200):
                          "text": tool_summary(b.get("name"), b.get("input")), "result": None, "error": False}
                     tools[b.get("id")] = t
                     messages.append(t)
-    if after is None:
+    if before is not None:
+        older = [m for m in messages if m["i"] < before]
+        out = older[-limit:] if limit else older
+    elif after is None:
         out = messages[-limit:] if limit else messages
     else:
         out = [m for m in messages if m["i"] > after or (m["role"] == "tool" and m["i"] in updated)][:limit or None]
@@ -2129,7 +2134,7 @@ def view_local(verb, name, args, data=None):
         e = load(name)
         if not e or not e.get("session_id"):
             raise Fail("no agent named %s on %s" % (name, machine()))
-        msgs, nxt = read_transcript(e["session_id"], args.get("after"), args.get("limit", 200))
+        msgs, nxt = read_transcript(e["session_id"], args.get("after"), args.get("limit", 200), args.get("before"))
         return {"agent": agent, "session_id": e["session_id"], "messages": msgs, "next": nxt}
     e, a = live_tmux(name)
     if verb == "screen":
@@ -2168,8 +2173,9 @@ def view(verb, target, args, data=None):
         return view_local(verb, name, args, data)
     extra = []
     if verb == "transcript":
-        if args.get("after") is not None:
-            extra += ["--after", args["after"]]
+        for key in ("after", "before"):
+            if args.get(key) is not None:
+                extra += ["--" + key, args[key]]
         extra += ["--limit", args.get("limit", 200)]
     elif verb == "keys":
         extra += list(args.get("keys") or [])
@@ -2181,7 +2187,7 @@ def cmd_view(args):
     opts = {}
     data = None
     if verb == "transcript":
-        opts = {"after": args.after, "limit": args.limit}
+        opts = {"after": args.after, "before": args.before, "limit": args.limit}
     elif verb == "keys":
         opts = {"keys": args.keys}
     elif verb == "prompt":
@@ -2264,7 +2270,7 @@ def cmd_rpc(args):
         elif verb in ("transcript", "screen", "prompt", "keys"):
             name, opts, data = check_name(rest[0]), {}, None
             if verb == "transcript":
-                for flag, key in (("--after", "after"), ("--limit", "limit")):
+                for flag, key in (("--after", "after"), ("--before", "before"), ("--limit", "limit")):
                     if flag in rest:
                         opts[key] = int(rest[rest.index(flag) + 1])
             elif verb == "keys":
@@ -2859,7 +2865,8 @@ def main():
 
     s = sub.add_parser("transcript", help="an agent's conversation, from its Claude transcript")
     s.add_argument("agent", help="name or name@machine")
-    s.add_argument("--after", type=int, help="only messages after this line number")
+    s.add_argument("--after", type=int, help="the first messages after this line number")
+    s.add_argument("--before", type=int, help="the last messages before this line number")
     s.add_argument("--limit", type=int, default=200)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_view)

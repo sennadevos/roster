@@ -11,15 +11,20 @@ List<Map<String, dynamic>> lines(int n, {bool lastToolDone = true}) => [
     ];
 
 void main() {
-  test('tail, then new messages, then older ones through the after window', () async {
+  test('tail, then new messages, then older ones with before', () async {
     var transcript = lines(30, lastToolDone: false);
     final hub = FakeHub({
       'GET /v1/transcript': (_, q) {
         final limit = int.parse(q['limit'] ?? '200');
         final after = q['after'] == null ? null : int.parse(q['after']!);
-        final rows = after == null
-            ? transcript.sublist((transcript.length - limit).clamp(0, transcript.length))
-            : transcript.where((m) => (m['i'] as int) > after).take(limit).toList();
+        final before = q['before'] == null ? null : int.parse(q['before']!);
+        List<Map<String, dynamic>> tail(List<Map<String, dynamic>> l) =>
+            l.sublist((l.length - limit).clamp(0, l.length));
+        final rows = before != null
+            ? tail(transcript.where((m) => (m['i'] as int) < before).toList())
+            : after == null
+                ? tail(transcript)
+                : transcript.where((m) => (m['i'] as int) > after).take(limit).toList();
         return {'agent': 'a@m', 'session_id': 's', 'messages': rows,
           'next': rows.isEmpty ? (after ?? 0) + 1 : (rows.last['i'] as int) + 1};
       },
@@ -40,9 +45,11 @@ void main() {
     expect(c.messages.firstWhere((m) => m.text == 'm30').result, 'done');
 
     await c.loadOlder();
-    expect(c.messages.first.text, 'm7');
-    expect(c.messages.map((m) => m.i).toList(), [for (var k = 7; k <= 32; k++) 2 * k]);
+    expect(c.messages.first.text, 'm11');
+    expect(c.messages.map((m) => m.i).toList(), [for (var k = 11; k <= 32; k++) 2 * k]);
     await c.loadOlder();
+    expect(c.messages.first.text, 'm1');
+    await c.loadOlder(); // a short page: nothing older left
     expect(c.messages.first.text, 'm1');
     expect(c.hasOlder, isFalse);
   });

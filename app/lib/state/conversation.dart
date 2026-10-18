@@ -9,12 +9,9 @@ import '../models/transcript.dart';
 
 /// One agent's conversation and terminal, for the agent screen.
 ///
-/// The contract pages forward only (`after`, plus `limit`; without `after`
-/// the hub answers the last `limit` messages). So the screen starts from the
-/// tail, and older messages come from a window of lines before the oldest one
-/// shown: `after = oldest - window`, keeping what is older than `oldest`. That
-/// relies on `limit` taking the first messages after `after`; a `before`
-/// parameter on the hub would make it exact.
+/// The screen starts from the tail (no `after`: the last `limit` messages),
+/// takes newer ones with `after`, and older ones with `before` = the oldest
+/// line shown.
 class Conversation extends ChangeNotifier {
   Conversation(this.client, this.agent, {this.pageSize = 100});
 
@@ -102,27 +99,10 @@ class Conversation extends ChangeNotifier {
     loadingOlder = true;
     _changed();
     try {
-      final oldest = messages.first.i;
-      final older = <Message>[];
-      var window = pageSize * 3;
-      var from = oldest;
-      // Widen the window until it holds something; transcripts have long
-      // stretches of lines that are not messages (thinking, meta, results).
-      for (var tries = 0; older.isEmpty && from > 0 && tries < 5; tries++) {
-        from = max(0, oldest - window);
-        var cursor = from;
-        while (true) {
-          final page = await client.transcript(agent, after: cursor, limit: pageSize);
-          final mine = page.messages.where((m) => m.i < oldest).toList();
-          older.addAll(mine);
-          if (mine.length < page.messages.length || page.messages.length < pageSize || page.next <= cursor) break;
-          cursor = page.next;
-        }
-        window *= 3;
-      }
+      final page = await client.transcript(agent, before: messages.first.i, limit: pageSize);
       final seen = {for (final m in messages) m.key};
-      messages.insertAll(0, older.where((m) => seen.add(m.key)));
-      hasOlder = from > 0;
+      messages.insertAll(0, page.messages.where((m) => seen.add(m.key)));
+      hasOlder = page.messages.length == pageSize;
     } on HubException catch (e) {
       error = e.message;
     } finally {

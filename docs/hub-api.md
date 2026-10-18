@@ -24,7 +24,7 @@ The agent's Claude conversation, from its transcript JSONL (`~/.claude/projects/
  ], "next": 415}
 ```
 
-- `i` is the JSONL line number; `--after I` returns messages with a larger `i`; `next` is what to pass next time. Without `--after`, the last `--limit` (default 200) messages.
+- `i` is the JSONL line number (from 1). `--after I` returns the first `--limit` messages with a larger `i`, plus earlier tool calls whose result arrived after `I` (same `i`, to merge); `next` is what to pass next time. `--before I` returns the last `--limit` messages with a smaller `i`, for scrolling back. With neither, the last `--limit` (default 200).
 - `role`: `user` (what the user, a wake or a hook-injected prompt typed), `assistant` (text Claude wrote), `tool` (a tool call, with its result folded in once it exists; `text` is a one-line summary: the command, the file path, the query).
 - Skipped: meta lines, thinking blocks, system/summary lines, empty texts.
 
@@ -67,7 +67,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 | `GET /v1/version` | | `{"hub": "0.3.0", "api": 1}` |
 | `POST /v1/pair` | `{"code", "device_name"}` | `{"token", "device_id"}` |
 | `GET /v1/agents` | `?all=1` for gone ones too | `{"agents": [row…], "machines": [{"name", "local": bool, "reachable": bool, "error"}]}`; a row is a `roster list --json` row plus `"agent": "name@machine"` |
-| `GET /v1/transcript` | `?agent=&after=&limit=` | as `roster transcript --json` |
+| `GET /v1/transcript` | `?agent=&after=&before=&limit=` | as `roster transcript --json` |
 | `GET /v1/screen` | `?agent=` | as `roster screen --json` |
 | `POST /v1/prompt` | `{"agent", "text"}` | `{"ok": true}` |
 | `POST /v1/keys` | `{"agent", "keys": [...]}` | `{"ok": true}` |
