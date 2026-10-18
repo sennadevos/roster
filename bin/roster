@@ -118,7 +118,7 @@ import time  # noqa: E402
 import uuid  # noqa: E402
 from datetime import datetime  # noqa: E402
 
-VERSION = "0.2.0"
+VERSION = "0.3.0"
 # Peers on other machines must speak the same protocol (see `roster rpc`).
 PROTOCOL = 1
 
@@ -444,9 +444,9 @@ def title(name, mach=None):
     return TITLE % (name, mach or machine())
 
 
-def run(argv, timeout=15, env=None):
+def run(argv, timeout=15, env=None, input=None):
     try:
-        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env)
+        return subprocess.run(argv, capture_output=True, text=True, timeout=timeout, env=env, input=input)
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise Fail("%s: %s" % (os.path.basename(argv[0]), exc))
 
@@ -1940,6 +1940,227 @@ def attach_remote(mach, row):
     return "opened %s@%s" % (name, mach)
 
 
+# --- looking at an agent from elsewhere: transcript, screen, prompt, keys -----
+#
+# For roster-hub and the phone app (docs/hub-api.md), and handy by hand. Each
+# takes `name` or `name@machine` and runs on the agent's own machine.
+
+KEYS_OK = {"Up", "Down", "Left", "Right", "Enter", "Escape", "Tab", "BSpace"} | set("0123456789yn")
+
+
+def transcript_path(session_id):
+    paths = glob.glob(os.path.expanduser("~/.claude/projects/*/%s.jsonl" % session_id))
+    if not paths:
+        raise Fail("no transcript for session %s" % session_id)
+    return max(paths, key=os.path.getmtime)
+
+
+def local_stamp(ts):
+    """Claude's UTC timestamps (2026-10-18T14:32:11.123Z) in the roster's local form."""
+    try:
+        return datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone().strftime("%Y-%m-%dT%H:%M:%S%z")
+    except (AttributeError, ValueError):
+        return None
+
+
+def tool_summary(name, inp):
+    """One line saying what a tool call does: its command, path, pattern or query."""
+    if not isinstance(inp, dict):
+        return name
+    for key in ("command", "file_path", "path", "pattern", "url", "query", "description", "prompt", "skill"):
+        val = inp.get(key)
+        if isinstance(val, str) and val.strip():
+            line = " ".join(val.split())
+            return line[:200] + ("…" if len(line) > 200 else "")
+    return name
+
+
+def block_text(content):
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        return "\n".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+    return ""
+
+
+def read_transcript(session_id, after=None, limit=200):
+    """The conversation as messages: user and assistant texts, and tool calls with their results.
+
+    `i` is the line in the JSONL. With `after`, only what came later, plus any
+    earlier tool call whose result only arrived later (same `i`, to merge).
+    """
+    messages, tools, updated, last = [], {}, set(), 0
+    with open(transcript_path(session_id)) as f:
+        for i, line in enumerate(f, 1):
+            last = i
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if rec.get("isMeta") or rec.get("isSidechain") or rec.get("type") not in ("user", "assistant"):
+                continue
+            msg = rec.get("message") or {}
+            at = local_stamp(rec.get("timestamp"))
+            content = msg.get("content")
+            if rec["type"] == "user":
+                if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
+                                                     for b in content):
+                    for b in content:
+                        if isinstance(b, dict) and b.get("type") == "tool_result" and b.get("tool_use_id") in tools:
+                            t = tools[b["tool_use_id"]]
+                            res = block_text(b.get("content"))
+                            t["result"] = res[:2000] + ("…" if len(res) > 2000 else "")
+                            t["error"] = bool(b.get("is_error"))
+                            if after is not None and t["i"] <= after < i:
+                                updated.add(t["i"])
+                    continue
+                text = block_text(content).strip()
+                if text:
+                    messages.append({"i": i, "at": at, "role": "user", "text": text})
+                continue
+            for b in content if isinstance(content, list) else [{"type": "text", "text": content or ""}]:
+                if not isinstance(b, dict):
+                    continue
+                if b.get("type") == "text" and b.get("text", "").strip():
+                    messages.append({"i": i, "at": at, "role": "assistant", "text": b["text"].strip()})
+                elif b.get("type") == "tool_use":
+                    t = {"i": i, "at": at, "role": "tool", "tool": b.get("name"),
+                         "text": tool_summary(b.get("name"), b.get("input")), "result": None, "error": False}
+                    tools[b.get("id")] = t
+                    messages.append(t)
+    if after is None:
+        out = messages[-limit:] if limit else messages
+    else:
+        out = [m for m in messages if m["i"] > after or (m["role"] == "tool" and m["i"] in updated)][:limit or None]
+    return out, max(last, after or 0)
+
+
+def read_screen(e):
+    """The agent's terminal text now, and the numbered choice dialog on it if there is one."""
+    text = tmux("capture-pane", "-p", "-t", e["pane_id"])
+    lines = [re.sub(r"^[\s│┃|]+|[\s│┃|]+$", "", l) for l in text.splitlines()]
+    opts, first = [], None
+    for n, line in enumerate(lines):
+        m = re.match(r"^(?:❯\s*)?(\d)\.\s+(.+)$", line)
+        if m:
+            if not opts or int(m.group(1)) == int(opts[-1]["key"]) + 1:
+                if not opts:
+                    first = n
+                opts.append({"key": m.group(1), "label": m.group(2).strip()})
+                continue
+        if opts and line and not m:
+            # A wrapped option label continues on the next line; anything after
+            # a blank line or the footer ends the list.
+            if line.startswith(("Enter to", "Esc to")) or not lines[n - 1]:
+                break
+            opts[-1]["label"] += " " + line
+    dialog = None
+    if len(opts) >= 2 and opts[0]["key"] == "1":
+        title = next((l for l in reversed(lines[:first]) if l and not re.match(r"^[─━╌-]+$", l)), "")
+        dialog = {"title": title, "options": opts}
+    return text, dialog
+
+
+def paste(e, text):
+    """Type text into the agent's input in one piece (bracketed paste), then press Enter."""
+    buf = "roster-%s" % e["pane_id"].lstrip("$")
+    proc = run([tool("tmux"), "-L", TMUX_SOCKET, "load-buffer", "-b", buf, "-"], input=text)
+    if proc.returncode != 0:
+        raise Fail("tmux load-buffer: %s" % proc.stderr.strip())
+    tmux("paste-buffer", "-p", "-d", "-b", buf, "-t", e["pane_id"])
+    time.sleep(0.15)
+    tmux("send-keys", "-t", e["pane_id"], "Enter")
+
+
+def live_tmux(name):
+    matched = reconcile()
+    e, a = load(name), matched.get(name)
+    if not e or backend(e) != "tmux" or a is None:
+        raise Fail("%s is not a live tmux agent on %s" % (name, machine()))
+    return e, a
+
+
+def view_local(verb, name, args, data=None):
+    """transcript/screen/prompt/keys for an agent on this machine; returns the JSON answer."""
+    agent = "%s@%s" % (name, machine())
+    if verb == "transcript":
+        e = load(name)
+        if not e or not e.get("session_id"):
+            raise Fail("no agent named %s on %s" % (name, machine()))
+        msgs, nxt = read_transcript(e["session_id"], args.get("after"), args.get("limit", 200))
+        return {"agent": agent, "session_id": e["session_id"], "messages": msgs, "next": nxt}
+    e, a = live_tmux(name)
+    if verb == "screen":
+        text, dialog = read_screen(e)
+        return {"agent": agent, "status": e.get("status"), "text": text, "dialog": dialog}
+    if verb == "prompt":
+        text = (data or {}).get("text") or ""
+        if not text.strip():
+            raise Fail("empty prompt")
+        if e.get("status") == "blocked":
+            raise Fail("%s is waiting on a dialog; answer it with keys" % name)
+        if not prompt_is_empty(e):
+            raise Fail("%s has unsent text in its input" % name)
+        paste(e, text)
+        return {"ok": True}
+    if verb == "keys":
+        keys = list(args.get("keys") or [])
+        bad = [k for k in keys if k not in KEYS_OK]
+        if not keys or bad:
+            raise Fail("keys must be from %s; got %s" % (" ".join(sorted(KEYS_OK)), " ".join(bad) or "none"))
+        for k in keys:
+            tmux("send-keys", "-t", e["pane_id"], k)
+            time.sleep(0.05)
+        return {"ok": True}
+    raise Fail("unknown view %s" % verb)
+
+
+def view(verb, target, args, data=None):
+    """Run a view on whichever machine the agent is on."""
+    name, mach = split_target(target)
+    check_name(name)
+    if mach in (None, machine()) and load(name):
+        return view_local(verb, name, args, data)
+    where = locate(name, mach)
+    if where[0] == "local":
+        return view_local(verb, name, args, data)
+    extra = []
+    if verb == "transcript":
+        if args.get("after") is not None:
+            extra += ["--after", args["after"]]
+        extra += ["--limit", args.get("limit", 200)]
+    elif verb == "keys":
+        extra += list(args.get("keys") or [])
+    return rpc(where[1], verb, name, *extra, data=data, timeout=30)
+
+
+def cmd_view(args):
+    verb = args.cmd
+    opts = {}
+    data = None
+    if verb == "transcript":
+        opts = {"after": args.after, "limit": args.limit}
+    elif verb == "keys":
+        opts = {"keys": args.keys}
+    elif verb == "prompt":
+        data = {"text": sys.stdin.read() if args.text in (None, "-") else args.text}
+    out = view(verb, args.agent, opts, data)
+    if getattr(args, "json", False):
+        print(json.dumps(out))
+    elif verb == "transcript":
+        for m in out["messages"]:
+            who = {"user": "you", "assistant": "claude"}.get(m["role"], m.get("tool") or "tool")
+            print("--- %s · %s\n%s\n" % (who, m.get("at"), m["text"]))
+    elif verb == "screen":
+        print(out["text"])
+        if out["dialog"]:
+            print("dialog: %s" % out["dialog"]["title"])
+            for o in out["dialog"]["options"]:
+                print("  %s. %s" % (o["key"], o["label"]))
+    else:
+        print("ok")
+
+
 # --- the far side of a peer link ---------------------------------------------
 
 
@@ -1996,6 +2217,17 @@ def cmd_rpc(args):
             out = {"name": kill_local(check_name(rest[0]))}
         elif verb == "events":
             return cmd_events(argparse.Namespace(machine=None, all=False))
+        elif verb in ("transcript", "screen", "prompt", "keys"):
+            name, opts, data = check_name(rest[0]), {}, None
+            if verb == "transcript":
+                for flag, key in (("--after", "after"), ("--limit", "limit")):
+                    if flag in rest:
+                        opts[key] = int(rest[rest.index(flag) + 1])
+            elif verb == "keys":
+                opts["keys"] = rest[1:]
+            elif verb == "prompt":
+                data = json.load(sys.stdin)
+            out = view_local(verb, name, opts, data)
         else:
             raise Fail("unknown request %r" % verb)
     except Fail as exc:
@@ -2551,6 +2783,30 @@ def main():
     s = sub.add_parser("cleanup", help="end and forget detached agents that never got a real name")
     s.add_argument("-n", "--dry-run", action="store_true", help="only say what would go")
     s.set_defaults(fn=cmd_cleanup)
+
+    s = sub.add_parser("transcript", help="an agent's conversation, from its Claude transcript")
+    s.add_argument("agent", help="name or name@machine")
+    s.add_argument("--after", type=int, help="only messages after this line number")
+    s.add_argument("--limit", type=int, default=200)
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("screen", help="what is on an agent's terminal, and its dialog if one is open")
+    s.add_argument("agent")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("prompt", help="type a prompt into an agent as the user")
+    s.add_argument("agent")
+    s.add_argument("text", nargs="?", help="the prompt, or - / omitted for stdin")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("keys", help="send keys to an agent, to answer a dialog")
+    s.add_argument("agent")
+    s.add_argument("keys", nargs="+", help="Up Down Left Right Enter Escape Tab BSpace 0-9 y n")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
 
     s = sub.add_parser("peer", help="other machines: add, list, update, remove")
     s.add_argument("action", choices=["add", "list", "update", "remove", "accept"])
