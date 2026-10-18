@@ -1,0 +1,411 @@
+#!/usr/bin/python3
+"""roster-tray: the agent roster as a system tray menu.
+
+A StatusNotifierItem with a com.canonical.dbusmenu menu, for whichever tray
+host owns org.kde.StatusNotifierWatcher (noctalia, under niri). The menu is the
+`roster list` tree: a lead is a submenu holding itself and the agents under it,
+each with its status glyph and unread count. Clicking an agent runs
+`roster attach`; the top item runs `roster new`, and a plain click on the
+icon opens roster-pick. The icon gets a red badge when an agent is blocked,
+a magenta one when an agent has unread mail.
+
+It only reads the roster, through `roster list --json`, and rebuilds when
+something under ~/.local/state/roster/ changes (inotify, no polling), and again
+whenever the menu is opened.
+
+Needs the system python: dbus-python and PyGObject come with the image.
+Run by roster-tray.service.
+"""
+
+import ctypes
+import json
+import os
+import struct
+import subprocess
+import sys
+
+import dbus
+import dbus.service
+from dbus.mainloop.glib import DBusGMainLoop
+from gi.repository import GLib
+
+ROSTER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "roster")
+PICK = ROSTER + "-pick"
+STATE = os.path.join(
+    os.environ.get("XDG_STATE_HOME") or os.path.expanduser("~/.local/state"), "roster")
+AGENTS = os.path.join(STATE, "agents")
+
+ITEM_PATH = "/StatusNotifierItem"
+MENU_PATH = "/MenuBar"
+ITEM_IFACE = "org.kde.StatusNotifierItem"
+MENU_IFACE = "com.canonical.dbusmenu"
+WATCHER = "org.kde.StatusNotifierWatcher"
+
+GLYPH = {"working": "●", "blocked": "▲", "done": "✓", "idle": "○", "unknown": "?"}
+
+
+# --- icon ------------------------------------------------------------------
+
+INK = (0xE6, 0xE6, 0xEB)
+BADGE = {"blocked": (0xF3, 0x4F, 0x4F), "unread": (0xC6, 0x6B, 0xF0)}
+
+
+def icon(size, badge=None):
+    """ARGB32 pixels, network byte order: a small tree of three nodes, and a badge."""
+    def coverage(x, y, shapes):
+        hit = 0
+        for sx in (0.125, 0.375, 0.625, 0.875):
+            for sy in (0.125, 0.375, 0.625, 0.875):
+                px, py = (x + sx) / size, (y + sy) / size
+                if any(s(px, py) for s in shapes):
+                    hit += 1
+        return hit / 16
+
+    def disc(cx, cy, r):
+        return lambda x, y: (x - cx) ** 2 + (y - cy) ** 2 <= r * r
+
+    def bar(x0, y0, x1, y1):
+        return lambda x, y: x0 <= x <= x1 and y0 <= y <= y1
+
+    tree = [disc(0.5, 0.22, 0.13), disc(0.24, 0.76, 0.13), disc(0.76, 0.76, 0.13),
+            bar(0.46, 0.22, 0.54, 0.52), bar(0.20, 0.48, 0.80, 0.56),
+            bar(0.20, 0.48, 0.28, 0.76), bar(0.72, 0.48, 0.80, 0.76)]
+    dot = [disc(0.84, 0.16, 0.15)] if badge else []
+    ring = [disc(0.84, 0.16, 0.21)] if badge else []
+    out = bytearray()
+    for y in range(size):
+        for x in range(size):
+            b = coverage(x, y, dot) if badge else 0
+            if b:
+                rgb, a = BADGE[badge], b
+            else:
+                # Cut a gap around the badge so it reads against the tree.
+                a = 0 if (ring and coverage(x, y, ring) == 1) else coverage(x, y, tree)
+                rgb = INK
+            out += struct.pack(">BBBB", round(a * 255), *rgb)
+    return dbus.Struct((size, size, dbus.ByteArray(bytes(out))), signature="iiay")
+
+
+# --- inotify ---------------------------------------------------------------
+
+IN_MODIFY, IN_CLOSE_WRITE, IN_MOVED_FROM, IN_MOVED_TO = 0x2, 0x8, 0x40, 0x80
+IN_CREATE, IN_DELETE, IN_DELETE_SELF, IN_ONLYDIR = 0x100, 0x200, 0x400, 0x01000000
+IN_NONBLOCK, IN_CLOEXEC = 0o4000, 0o2000000
+MASK = IN_CLOSE_WRITE | IN_MOVED_FROM | IN_MOVED_TO | IN_CREATE | IN_DELETE | IN_DELETE_SELF | IN_ONLYDIR
+
+
+class Watch:
+    """inotify on the state tree: agents/, each agent dir, each inbox/new."""
+
+    def __init__(self, on_change):
+        self.libc = ctypes.CDLL("libc.so.6", use_errno=True)
+        self.fd = self.libc.inotify_init1(IN_NONBLOCK | IN_CLOEXEC)
+        if self.fd < 0:
+            raise OSError(ctypes.get_errno(), "inotify_init1")
+        self.on_change = on_change
+        self.pending = None
+        self.rewatch()
+        GLib.io_add_watch(self.fd, GLib.IO_IN, self.readable)
+
+    def add(self, path):
+        self.libc.inotify_add_watch(self.fd, os.fsencode(path), MASK)
+
+    def rewatch(self):
+        """Watch every directory that exists now; re-adding a watch is a no-op."""
+        os.makedirs(AGENTS, exist_ok=True)
+        self.add(STATE)
+        self.add(AGENTS)
+        for d in os.listdir(AGENTS):
+            path = os.path.join(AGENTS, d)
+            self.add(path)
+            self.add(os.path.join(path, "inbox"))
+            self.add(os.path.join(path, "inbox", "new"))
+
+    def readable(self, fd, cond):
+        try:
+            while os.read(self.fd, 65536):
+                pass
+        except BlockingIOError:
+            pass
+        # Debounce: a send or a status write is a burst of renames.
+        if self.pending is None:
+            self.pending = GLib.timeout_add(250, self.fire)
+        return True
+
+    def fire(self):
+        self.pending = None
+        self.rewatch()
+        self.on_change()
+        return False
+
+
+# --- the menu --------------------------------------------------------------
+
+
+def label(text):
+    return text.replace("_", "__")  # a single _ marks a mnemonic in dbusmenu
+
+
+class Menu(dbus.service.Object):
+    def __init__(self, bus, tray):
+        super().__init__(bus, MENU_PATH)
+        self.tray = tray
+        self.revision = 1
+        self.items = {}   # id -> props
+        self.kids = {}    # id -> [child ids]
+        self.actions = {}  # id -> argv
+        self.build([])
+
+    def build(self, rows):
+        items, kids, actions = {0: {"children-display": "submenu"}}, {0: []}, {}
+
+        def add(parent, props, argv=None):
+            iid = len(items)  # 0 is the root
+            items[iid] = props
+            kids.setdefault(parent, []).append(iid)
+            if argv:
+                actions[iid] = argv
+            return iid
+
+        add(0, {"label": "New agent", "icon-name": "list-add"}, [ROSTER, "new", os.path.expanduser("~")])
+        add(0, {"type": "separator"})
+        if not rows:
+            add(0, {"label": "No agents", "enabled": False})
+
+        live = {e["name"]: e for e in rows}
+        nodes = {}
+
+        def text(e):
+            t = "%s  %s" % (GLYPH.get(e.get("status"), "?"), e["name"].rsplit("/", 1)[-1])
+            if e.get("unread"):
+                t += "   ✉ %d" % e["unread"]
+            return label(t)
+
+        def node(path):
+            """The submenu for a name path that has agents under it."""
+            if path in nodes:
+                return nodes[path]
+            parent = node(path.rsplit("/", 1)[0]) if "/" in path else 0
+            e = live.get(path)
+            sub = add(parent, {"label": text(e) if e else label(path.rsplit("/", 1)[-1]),
+                               "children-display": "submenu"})
+            if e:
+                add(sub, {"label": label("Open %s" % path)}, [ROSTER, "attach", path])
+                add(sub, {"type": "separator"})
+            nodes[path] = sub
+            return sub
+
+        names = sorted(live, key=lambda n: n.split("/"))
+        has_kids = {n.rsplit("/", 1)[0] for n in names if "/" in n}
+        # Every prefix of a name with agents below it is a submenu, even when
+        # that lead itself is not live.
+        prefixes = set()
+        for n in has_kids:
+            parts = n.split("/")
+            prefixes |= {"/".join(parts[:i]) for i in range(1, len(parts) + 1)}
+        for n in names:
+            if n in prefixes:
+                node(n)
+                continue
+            parent = node(n.rsplit("/", 1)[0]) if "/" in n else 0
+            add(parent, {"label": text(live[n])}, [ROSTER, "attach", n])
+
+        changed = (items, kids) != (self.items, self.kids)
+        self.items, self.kids, self.actions = items, kids, actions
+        if changed:
+            self.revision += 1
+            self.LayoutUpdated(self.revision, 0)
+        return changed
+
+    def layout(self, iid, depth):
+        props = dbus.Dictionary(self.items.get(iid, {}), signature="sv")
+        children = []
+        if depth != 0:
+            children = [self.layout(c, depth - 1) for c in self.kids.get(iid, [])]
+        return dbus.Struct((iid, props, dbus.Array(children, signature="v")), signature="ia{sv}av")
+
+    @dbus.service.method(MENU_IFACE, in_signature="iias", out_signature="u(ia{sv}av)")
+    def GetLayout(self, parent, depth, names):
+        return self.revision, self.layout(parent, depth)
+
+    @dbus.service.method(MENU_IFACE, in_signature="aias", out_signature="a(ia{sv})")
+    def GetGroupProperties(self, ids, names):
+        ids = ids or list(self.items)
+        return [dbus.Struct((i, dbus.Dictionary(self.items[i], signature="sv")), signature="ia{sv}")
+                for i in ids if i in self.items]
+
+    @dbus.service.method(MENU_IFACE, in_signature="is", out_signature="v")
+    def GetProperty(self, iid, name):
+        return self.items.get(iid, {}).get(name, "")
+
+    @dbus.service.method(MENU_IFACE, in_signature="isvu", out_signature="")
+    def Event(self, iid, event, data, timestamp):
+        if event == "clicked" and iid in self.actions:
+            subprocess.Popen(self.actions[iid], stdin=subprocess.DEVNULL, start_new_session=True)
+
+    @dbus.service.method(MENU_IFACE, in_signature="a(isvu)", out_signature="ai")
+    def EventGroup(self, events):
+        for iid, event, data, ts in events:
+            self.Event(iid, event, data, ts)
+        return []
+
+    @dbus.service.method(MENU_IFACE, in_signature="i", out_signature="b")
+    def AboutToShow(self, iid):
+        return self.tray.refresh() if iid == 0 else False
+
+    @dbus.service.method(MENU_IFACE, in_signature="ai", out_signature="aiai")
+    def AboutToShowGroup(self, ids):
+        if 0 in ids:
+            self.tray.refresh()
+        return [], []
+
+    @dbus.service.signal(MENU_IFACE, signature="ui")
+    def LayoutUpdated(self, revision, parent):
+        pass
+
+    @dbus.service.signal(MENU_IFACE, signature="a(ia{sv})a(ias)")
+    def ItemsPropertiesUpdated(self, updated, removed):
+        pass
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="ss", out_signature="v")
+    def Get(self, iface, prop):
+        return self.GetAll(iface)[prop]
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        return {"Version": dbus.UInt32(3), "TextDirection": "ltr", "Status": "normal",
+                "IconThemePath": dbus.Array([], signature="s")}
+
+
+# --- the item --------------------------------------------------------------
+
+
+class Tray(dbus.service.Object):
+    def __init__(self, bus):
+        self.bus = bus
+        self.busname = "org.kde.StatusNotifierItem-%d-1" % os.getpid()
+        self.name = dbus.service.BusName(self.busname, bus)
+        super().__init__(bus, ITEM_PATH)
+        self.icons = {b: [icon(s, b) for s in (22, 32, 48)] for b in (None, "blocked", "unread")}
+        self.badge = None
+        self.tooltip = "No agents"
+        self.menu = Menu(bus, self)
+        self.refresh()
+        bus.add_signal_receiver(self.watcher_changed, "NameOwnerChanged",
+                                dbus.BUS_DAEMON_IFACE, arg0=WATCHER)
+        self.register()
+
+    def register(self):
+        try:
+            self.bus.get_object(WATCHER, "/StatusNotifierWatcher").RegisterStatusNotifierItem(
+                self.busname, dbus_interface=WATCHER)
+        except dbus.DBusException as exc:
+            print("roster-tray: no tray host yet (%s)" % exc.get_dbus_name(), file=sys.stderr)
+
+    def watcher_changed(self, name, old, new):
+        if new:
+            self.register()  # the bar restarted
+
+    def rows(self):
+        try:
+            proc = subprocess.run([ROSTER, "list", "--json"], capture_output=True, text=True, timeout=20)
+            return json.loads(proc.stdout) if proc.returncode == 0 else None
+        except (OSError, ValueError, subprocess.TimeoutExpired):
+            return None
+
+    def refresh(self):
+        rows = self.rows()
+        if rows is None:
+            return False
+        changed = self.menu.build(rows)
+        badge = ("blocked" if any(e.get("status") == "blocked" for e in rows)
+                 else "unread" if any(e.get("unread") for e in rows) else None)
+        live = len(rows)
+        blocked = sum(1 for e in rows if e.get("status") == "blocked")
+        mail = sum(e.get("unread", 0) for e in rows)
+        tip = "%d agent%s" % (live, "" if live == 1 else "s")
+        if blocked:
+            tip += " · %d blocked" % blocked
+        if mail:
+            tip += " · %d unread" % mail
+        if badge != self.badge:
+            self.badge = badge
+            self.NewIcon()
+            self.NewAttentionIcon()
+            self.NewStatus(self.status())
+        if tip != self.tooltip:
+            self.tooltip = tip
+            self.NewToolTip()
+        return changed
+
+    def status(self):
+        return "NeedsAttention" if self.badge == "blocked" else "Active"
+
+    def props(self):
+        return {
+            "Category": "ApplicationStatus",
+            "Id": "roster",
+            "Title": "Agent roster",
+            "Status": self.status(),
+            "WindowId": dbus.UInt32(0),
+            "IconName": "",
+            "IconPixmap": dbus.Array(self.icons[self.badge], signature="(iiay)"),
+            "AttentionIconName": "",
+            "AttentionIconPixmap": dbus.Array(self.icons[self.badge], signature="(iiay)"),
+            "OverlayIconName": "",
+            "ToolTip": dbus.Struct(("", dbus.Array([], signature="(iiay)"), "Agent roster", self.tooltip),
+                                   signature="sa(iiay)ss"),
+            "ItemIsMenu": True,
+            "Menu": dbus.ObjectPath(MENU_PATH),
+        }
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="ss", out_signature="v")
+    def Get(self, iface, prop):
+        return self.props()[prop]
+
+    @dbus.service.method(dbus.PROPERTIES_IFACE, in_signature="s", out_signature="a{sv}")
+    def GetAll(self, iface):
+        return self.props()
+
+    @dbus.service.method(ITEM_IFACE, in_signature="ii")
+    def Activate(self, x, y):
+        subprocess.Popen([PICK], stdin=subprocess.DEVNULL, start_new_session=True)
+
+    @dbus.service.method(ITEM_IFACE, in_signature="ii")
+    def SecondaryActivate(self, x, y):
+        pass
+
+    @dbus.service.method(ITEM_IFACE, in_signature="ii")
+    def ContextMenu(self, x, y):
+        pass
+
+    @dbus.service.method(ITEM_IFACE, in_signature="is")
+    def Scroll(self, delta, orientation):
+        pass
+
+    @dbus.service.signal(ITEM_IFACE)
+    def NewIcon(self):
+        pass
+
+    @dbus.service.signal(ITEM_IFACE)
+    def NewAttentionIcon(self):
+        pass
+
+    @dbus.service.signal(ITEM_IFACE, signature="s")
+    def NewStatus(self, status):
+        pass
+
+    @dbus.service.signal(ITEM_IFACE)
+    def NewToolTip(self):
+        pass
+
+
+def main():
+    DBusGMainLoop(set_as_default=True)
+    tray = Tray(dbus.SessionBus())
+    Watch(tray.refresh)
+    GLib.MainLoop().run()
+
+
+if __name__ == "__main__":
+    main()

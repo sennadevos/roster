@@ -1,0 +1,49 @@
+#!/usr/bin/env python3
+"""roster-pick: choose a live agent from the roster in fuzzel (or rofi), and attach to it.
+
+A front end on the roster CLI, like roster-tray: it reads `roster list --json`
+and runs `roster attach <name>`, which focuses the agent's window or opens one.
+Meant for a compositor keybinding.
+"""
+
+import json
+import os
+import shutil
+import subprocess
+import sys
+
+ROSTER = os.path.join(os.path.dirname(os.path.realpath(__file__)), "roster")
+GLYPH = {"working": "●", "blocked": "▲", "done": "✓", "idle": "○", "unknown": "?"}
+# Keybindings run with the compositor's PATH, which may lack these.
+MENUS = (["fuzzel", "--dmenu", "--index", "--prompt", "roster › "],
+         ["rofi", "-dmenu", "-format", "i", "-p", "roster"])
+
+
+def main():
+    proc = subprocess.run([ROSTER, "list", "--json"], capture_output=True, text=True)
+    if proc.returncode != 0:
+        sys.exit(proc.stderr.strip() or "roster list failed")
+    rows = json.loads(proc.stdout)
+    if not rows:
+        sys.exit("no live agents")
+    lines = []
+    for e in rows:
+        status = e.get("status") or "unknown"
+        line = "%s%s %s   %s" % ("    " * e["name"].count("/"), GLYPH.get(status, "?"), e["name"], status)
+        if e.get("unread"):
+            line += "   ✉ %d" % e["unread"]
+        lines.append(line)
+    for argv in MENUS:
+        exe = shutil.which(argv[0]) or ("/usr/bin/" + argv[0] if os.path.exists("/usr/bin/" + argv[0]) else None)
+        if not exe:
+            continue
+        pick = subprocess.run([exe, *argv[1:]], input="\n".join(lines) + "\n", capture_output=True, text=True)
+        choice = pick.stdout.strip()
+        if pick.returncode != 0 or not choice.isdigit():
+            return  # cancelled
+        os.execv(ROSTER, [ROSTER, "attach", rows[int(choice)]["name"]])
+    sys.exit("neither fuzzel nor rofi is installed")
+
+
+if __name__ == "__main__":
+    main()
