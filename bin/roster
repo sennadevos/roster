@@ -2172,8 +2172,14 @@ def cmd_install(args):
     if not args.no_hooks:
         done.append(merge_hooks(args.check))
     if not args.no_skill:
+        skill = os.path.expanduser("~/.claude/skills/roster/SKILL.md")
         with open(os.path.join(CODE, "share", "SKILL.md")) as f:
-            done.append(put(os.path.expanduser("~/.claude/skills/roster/SKILL.md"), f.read(), args.check))
+            try:
+                done.append(put(skill, f.read(), args.check))
+            except OSError as exc:
+                # e.g. ~/.claude/skills is a symlink to a folder that is not there
+                done.append("skipped  %s (%s); agents here lack the roster skill" % (
+                    short_path(skill), exc.strerror or exc))
     if args.tray:
         done.append(put(os.path.join(units, "roster-tray.service"),
                         TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
