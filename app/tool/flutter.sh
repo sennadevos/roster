@@ -3,7 +3,8 @@
 # building the image from ./Containerfile first if it is not there yet.
 # Pub and Gradle caches live in named podman volumes, so builds after the
 # first are quick, and so does ~/.android, so the debug key that signs the
-# APK stays the same from build to build. Examples:
+# APK stays the same from build to build, and so do the web fallback fonts
+# (tool/web_fonts.sh). Examples:
 #   tool/flutter.sh flutter build apk --release
 #   tool/flutter.sh flutter test
 set -eu
@@ -21,4 +22,5 @@ exec podman run --rm $keys \
   -v roster-app-pub:/root/.pub-cache \
   -v roster-app-gradle:/root/.gradle \
   -v roster-app-android:/root/.android \
+  -v roster-app-webfonts:/root/.cache/roster-webfonts \
   -w /app "$image" "$@"

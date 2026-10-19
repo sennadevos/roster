@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../app.dart';
 import '../models/misc.dart';
+import '../platform/platform.dart' show pushAvailable;
+import '../state/app_state.dart';
 import '../widgets/status.dart';
 
 /// Hub URL, paired devices, notifications, unpair.
@@ -56,7 +58,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
 
   Future<void> _revoke(Device d) async {
     final app = AppScope.read(context);
-    if (!await _confirm(d.current ? 'Unpair this phone?' : 'Revoke ${d.name}?', 'Revoke')) return;
+    if (!await _confirm(d.current ? 'Unpair this $deviceNoun?' : 'Revoke ${d.name}?', 'Revoke')) return;
     try {
       if (d.current) {
         await app.unpair();
@@ -95,15 +97,20 @@ class _SettingsScreenState extends State<SettingsScreen> {
       appBar: AppBar(title: const Text('Settings')),
       body: RefreshIndicator(
         onRefresh: _load,
-        child: ListView(
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 720),
+            child: ListView(
           children: [
             ListTile(
               leading: const Icon(Icons.dns_outlined),
               title: const Text('Hub'),
               subtitle: Text([app.hubUrl.toString(), ?_hubVersion].join('\n')),
-              onTap: _editUrl,
+              // On web the hub is the one that served the page.
+              onTap: app.hubLocked ? null : _editUrl,
             ),
-            SwitchListTile(
+            if (pushAvailable)
+              SwitchListTile(
               secondary: const Icon(Icons.notifications_outlined),
               title: const Text('Notifications'),
               subtitle: Text(app.pushProblem ?? 'Through the ntfy app (UnifiedPush)'),
@@ -123,7 +130,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
               for (final d in _devices!)
                 ListTile(
                   leading: Icon(d.current ? Icons.smartphone : Icons.phone_android_outlined),
-                  title: Text(d.current ? '${d.name} (this phone)' : d.name),
+                  title: Text(d.current ? '${d.name} (this $deviceNoun)' : d.name),
                   subtitle: Text([
                     if (d.lastSeen != null) 'last seen ${d.lastSeen}',
                     if (d.push) 'push',
@@ -137,12 +144,14 @@ class _SettingsScreenState extends State<SettingsScreen> {
             const Divider(),
             ListTile(
               leading: Icon(Icons.link_off, color: theme.colorScheme.error),
-              title: Text('Unpair this phone', style: TextStyle(color: theme.colorScheme.error)),
+              title: Text('Unpair this $deviceNoun', style: TextStyle(color: theme.colorScheme.error)),
               onTap: () async {
-                if (await _confirm('Unpair this phone?', 'Unpair')) await app.unpair();
+                if (await _confirm('Unpair this $deviceNoun?', 'Unpair')) await app.unpair();
               },
             ),
           ],
+        ),
+          ),
         ),
       ),
     );

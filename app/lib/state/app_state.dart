@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/widgets.dart';
 
 import '../api/hub_client.dart';
@@ -36,6 +37,9 @@ class NoPush implements PushControl {
   Future<void> clear(String agent) async {}
 }
 
+/// What the app calls the device it runs on.
+const deviceNoun = kIsWeb ? 'browser' : 'phone';
+
 /// The app's state: pairing, the agents list and the live event stream.
 /// Screens rebuild from it with ListenableBuilder (see AppScope).
 class AppState extends ChangeNotifier with WidgetsBindingObserver {
@@ -43,18 +47,31 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     required this.store,
     this.push = const NoPush(),
     HubClient Function(Uri base, String? token)? clientFor,
-  }) : _clientFor = clientFor ?? ((base, token) => HubClient(base, token: token));
+    this.fixedHubUrl,
+    this.keepStreamInBackground = false,
+  })  : _clientFor = clientFor ?? ((base, token) => HubClient(base, token: token)),
+        hubUrl = fixedHubUrl ?? normalizeHubUrl(defaultHubUrl);
 
   final Store store;
   final PushControl push;
   final HubClient Function(Uri base, String? token) _clientFor;
+
+  /// The hub, when it is not the user's choice: on web, the hub that served
+  /// the page (the API is same-origin only).
+  final Uri? fixedHubUrl;
+
+  /// Keep the event stream while the app is in the background, for when no
+  /// push covers that (web).
+  final bool keepStreamInBackground;
+
+  bool get hubLocked => fixedHubUrl != null;
 
   /// The agent whose screen is open, so its pushes can be dropped. Static
   /// because the push callback runs outside the widget tree.
   static String? onScreen;
 
   bool loaded = false;
-  Uri hubUrl = normalizeHubUrl(defaultHubUrl);
+  Uri hubUrl;
   HubClient? client;
   String? deviceId;
   bool notifications = true;
@@ -78,7 +95,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   Completer<Object?>? _streamDone;
 
   Future<void> load() async {
-    final url = await store.read(Keys.hubUrl);
+    final url = hubLocked ? null : await store.read(Keys.hubUrl);
     if (url != null) hubUrl = normalizeHubUrl(url);
     final token = await store.read(Keys.token);
     deviceId = await store.read(Keys.deviceId);
@@ -92,8 +109,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     }
   }
 
+  /// [url] is ignored when the hub is fixed.
   Future<void> pair(String url, String code, String deviceName) async {
-    final base = normalizeHubUrl(url);
+    final base = fixedHubUrl ?? normalizeHubUrl(url);
     final (token, id) = await _clientFor(base, null).pair(code.trim().toUpperCase(), deviceName.trim());
     hubUrl = base;
     deviceId = id;
@@ -127,6 +145,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   }
 
   Future<void> setHubUrl(String url) async {
+    if (hubLocked) return;
     hubUrl = normalizeHubUrl(url);
     await store.write(Keys.hubUrl, hubUrl.toString());
     final token = await store.read(Keys.token);
@@ -168,7 +187,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     try {
       _apply(await c.agents(all: showEnded));
     } on HubException catch (e) {
-      if (e.unauthorized) await unpair(revoke: false, reason: 'The hub no longer knows this phone.');
+      if (e.unauthorized) await unpair(revoke: false, reason: 'The hub no longer knows this $deviceNoun.');
       rethrow;
     }
     _kick();
@@ -226,7 +245,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
       _sub = null;
       if (gen != _gen) return;
       if (err is HubException && err.unauthorized) {
-        await unpair(revoke: false, reason: 'The hub no longer knows this phone.');
+        await unpair(revoke: false, reason: 'The hub no longer knows this $deviceNoun.');
         return;
       }
       linkError = switch (err) {
@@ -266,7 +285,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (!paired) return;
-    if (state == AppLifecycleState.paused) {
+    if (state == AppLifecycleState.paused && !keepStreamInBackground) {
       _stop();
     } else if (state == AppLifecycleState.resumed && link == Link.offline) {
       _start();

@@ -1,6 +1,8 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import '../app.dart';
 import '../models/agent.dart';
@@ -123,7 +125,8 @@ class _AgentScreenState extends State<AgentScreen> {
     final theme = Theme.of(context);
     return Scaffold(
       appBar: AppBar(
-        titleSpacing: 0,
+        // Tight next to a back button; beside the list there is none.
+        titleSpacing: (ModalRoute.of(context)?.canPop ?? false) ? 0 : null,
         title: Row(
           children: [
             StatusGlyph(status, size: 18),
@@ -295,7 +298,14 @@ class _Composer extends StatelessWidget {
         crossAxisAlignment: CrossAxisAlignment.end,
         children: [
           Expanded(
-            child: TextField(
+            // With a keyboard (web), Enter sends and Shift+Enter starts a new line.
+            child: CallbackShortcuts(
+              bindings: {
+                if (kIsWeb) const SingleActivator(LogicalKeyboardKey.enter): () {
+                  if (enabled) onSend();
+                },
+              },
+              child: TextField(
               controller: controller,
               enabled: enabled,
               minLines: 1,
@@ -306,6 +316,7 @@ class _Composer extends StatelessWidget {
                 border: const OutlineInputBorder(borderRadius: BorderRadius.all(Radius.circular(24))),
                 contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               ),
+            ),
             ),
           ),
           IconButton.filled(onPressed: enabled ? onSend : null, icon: const Icon(Icons.send), tooltip: 'Send'),

@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 
@@ -30,11 +32,14 @@ class _Bubble extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final width = MediaQuery.sizeOf(context).width;
+    return LayoutBuilder(builder: (context, box) {
+    // Of the pane it is in, which on a wide window is not the whole window;
+    // and no wider than reads well.
+    final width = box.maxWidth;
     return Align(
       alignment: mine ? Alignment.centerRight : Alignment.centerLeft,
       child: Container(
-        constraints: BoxConstraints(maxWidth: width * (mine ? 0.85 : 0.94)),
+        constraints: BoxConstraints(maxWidth: min(width * (mine ? 0.85 : 0.94), mine ? 640 : 820)),
         margin: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
         padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
         decoration: BoxDecoration(
@@ -56,6 +61,7 @@ class _Bubble extends StatelessWidget {
               ),
       ),
     );
+    });
   }
 }
 

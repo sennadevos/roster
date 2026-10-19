@@ -1,23 +1,54 @@
-import 'package:flutter_secure_storage/flutter_secure_storage.dart';
-
 /// Where the app keeps the hub URL, its device token and its settings.
+/// [platformStore] in platform_store.dart picks the one for the platform.
 abstract class Store {
   Future<String?> read(String key);
   Future<void> write(String key, String? value);
 }
 
-/// The phone's keystore-backed storage.
-class SecureStore implements Store {
-  SecureStore() : _s = const FlutterSecureStorage();
+/// A synchronous string key-value store, such as the browser's localStorage.
+abstract class StringStorage {
+  String? getItem(String key);
+  void setItem(String key, String value);
+  void removeItem(String key);
+}
 
-  final FlutterSecureStorage _s;
+/// The web's store: plain strings in [StringStorage] (localStorage), under
+/// [prefix] so they do not collide with anything else on the origin. The
+/// keystore-backed store needs WebCrypto, which a browser only offers in a
+/// secure context, and the hub is served over plain HTTP for now.
+///
+/// When the storage refuses (disabled, full, private mode), values are kept
+/// in memory for the session instead.
+class LocalStore implements Store {
+  LocalStore(this.storage, {this.prefix = 'roster.'});
+
+  final StringStorage storage;
+  final String prefix;
+  final Map<String, String?> _fallback = {};
 
   @override
-  Future<String?> read(String key) => _s.read(key: key);
+  Future<String?> read(String key) async {
+    if (_fallback.containsKey(key)) return _fallback[key];
+    try {
+      return storage.getItem('$prefix$key');
+    } on Object {
+      return null;
+    }
+  }
 
   @override
-  Future<void> write(String key, String? value) =>
-      value == null ? _s.delete(key: key) : _s.write(key: key, value: value);
+  Future<void> write(String key, String? value) async {
+    try {
+      if (value == null) {
+        storage.removeItem('$prefix$key');
+      } else {
+        storage.setItem('$prefix$key', value);
+      }
+      _fallback.remove(key);
+    } on Object {
+      _fallback[key] = value;
+    }
+  }
 }
 
 /// For tests.

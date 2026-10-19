@@ -1,15 +1,88 @@
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 
 import '../app.dart';
 import '../models/agent.dart';
 import '../state/app_state.dart';
 import '../widgets/status.dart';
+import 'agent_screen.dart';
 import 'new_agent_sheet.dart';
 import 'settings_screen.dart';
 
 /// Every agent the hub reaches, grouped by machine, live from `/v1/events`.
-class AgentsScreen extends StatelessWidget {
+/// On a wide window the open agent sits beside the list.
+class AgentsScreen extends StatefulWidget {
   const AgentsScreen({super.key});
+
+  @override
+  State<AgentsScreen> createState() => _AgentsScreenState();
+}
+
+class _AgentsScreenState extends State<AgentsScreen> {
+  bool? _wide;
+
+  /// Moves the open agent when the window crosses [splitViewWidth]: from its
+  /// own page into the pane beside the list, or back.
+  void _layout(bool wide) {
+    final was = _wide;
+    _wide = wide;
+    splitView = wide;
+    if (was == null || was == wide) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      final nav = navigatorKey.currentState;
+      if (!mounted || nav == null || splitView != wide) return;
+      final agent = selectedAgent.value;
+      if (wide) {
+        nav.popUntil((r) => r.settings.name != agentRouteName);
+      } else if (agent != null && (ModalRoute.of(context)?.isCurrent ?? false)) {
+        pushAgent(nav, agent);
+      }
+    });
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return LayoutBuilder(builder: (context, box) {
+      final wide = box.maxWidth >= splitViewWidth;
+      _layout(wide);
+      if (!wide) return const _AgentList();
+      return ValueListenableBuilder<String?>(
+        valueListenable: selectedAgent,
+        builder: (context, agent, _) => Row(
+          children: [
+            SizedBox(width: 380, child: _AgentList(selected: agent)),
+            const VerticalDivider(width: 1),
+            Expanded(
+              child: agent == null
+                  ? const _NoAgent()
+                  : AgentScreen(key: ValueKey(agent), agent: agent),
+            ),
+          ],
+        ),
+      );
+    });
+  }
+}
+
+class _NoAgent extends StatelessWidget {
+  const _NoAgent();
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    return Scaffold(
+      body: Center(
+        child: Text('Pick an agent on the left', style: theme.textTheme.bodyLarge?.copyWith(color: theme.colorScheme.outline)),
+      ),
+    );
+  }
+}
+
+class _AgentList extends StatelessWidget {
+  const _AgentList({this.selected});
+
+  /// The agent open beside the list, highlighted.
+  final String? selected;
 
   @override
   Widget build(BuildContext context) {
@@ -20,6 +93,15 @@ class AgentsScreen extends StatelessWidget {
         title: const Text('Roster'),
         actions: [
           _LinkDot(app),
+          // Pull to refresh needs a touch screen.
+          if (kIsWeb)
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              tooltip: 'Refresh',
+              onPressed: () => app.refresh().catchError((Object e) {
+                if (context.mounted) showError(context, e);
+              }),
+            ),
           PopupMenuButton<String>(
             onSelected: (v) => switch (v) {
               'ended' => app.setShowEnded(!app.showEnded),
@@ -61,7 +143,7 @@ class AgentsScreen extends StatelessWidget {
                     _MachineHeader(machine),
                     if (agents.isEmpty)
                       const ListTile(dense: true, title: Text('No agents')),
-                    for (final a in agents) AgentTile(a),
+                    for (final a in agents) AgentTile(a, selected: a.id == selected),
                   ],
                 ],
               ),
@@ -117,9 +199,10 @@ class _MachineHeader extends StatelessWidget {
 }
 
 class AgentTile extends StatelessWidget {
-  const AgentTile(this.agent, {super.key});
+  const AgentTile(this.agent, {super.key, this.selected = false});
 
   final Agent agent;
+  final bool selected;
 
   @override
   Widget build(BuildContext context) {
@@ -128,6 +211,8 @@ class AgentTile extends StatelessWidget {
     return Opacity(
       opacity: dim ? 0.6 : 1,
       child: ListTile(
+        selected: selected,
+        selectedTileColor: cs.secondaryContainer,
         leading: StatusGlyph(agent.status),
         title: Text(agent.name, overflow: TextOverflow.ellipsis),
         subtitle: agent.role == null ? null : Text(agent.role!, maxLines: 2, overflow: TextOverflow.ellipsis),
