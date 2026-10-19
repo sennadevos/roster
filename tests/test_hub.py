@@ -71,9 +71,18 @@ class HubTest(unittest.TestCase):
             f.write("ntfy-secret\n")
         cls.port = free_port()
         os.makedirs(os.path.join(cls.tmp, "config", "roster"))
+        cls.web = os.path.join(cls.tmp, "web")
+        os.makedirs(os.path.join(cls.web, "assets"))
+        for rel, text in (("index.html", "<!doctype html>app"), ("main.dart.js", "main()"),
+                          ("canvaskit.wasm", "\0asm"), ("assets/a.json", "{}")):
+            with open(os.path.join(cls.web, rel), "w") as f:
+                f.write(text)
+        with open(os.path.join(cls.tmp, "secret.txt"), "w") as f:
+            f.write("outside the web folder")
         with open(os.path.join(cls.tmp, "config", "roster", "hub.toml"), "w") as f:
             f.write('listen = "127.0.0.1:%d"\npublic_url = "https://hub.example"\n'
-                    'push_token_file = "%s"\npush_allowed = ["%s"]\n' % (cls.port, token_file, cls.sink_url))
+                    'push_token_file = "%s"\npush_allowed = ["%s"]\nweb_dir = "%s"\n'
+                    % (cls.port, token_file, cls.sink_url, cls.web))
         cls.env = dict(os.environ, XDG_STATE_HOME=os.path.join(cls.tmp, "state"),
                        XDG_CONFIG_HOME=os.path.join(cls.tmp, "config"), ROSTER_BIN=FAKE,
                        FAKE_ROSTER_DIR=cls.fake_dir)
@@ -153,7 +162,7 @@ class HubTest(unittest.TestCase):
         self.assertEqual(self.request("GET", "/v1/version"), (200, {"hub": "0.3.0", "api": 1}))
 
     def test_unknown_path_is_404_json(self):
-        status, got = self.request("GET", "/v2/nothing", token=self.token)
+        status, got = self.request("GET", "/v1/nothing", token=self.token)
         self.assertEqual(status, 404)
         self.assertIn("error", got)
 
@@ -346,6 +355,30 @@ class HubTest(unittest.TestCase):
         self.assertEqual(self.request("DELETE", "/v1/devices/" + dev2, token=self.token)[0], 404)
         self.assertNotIn(dev2, self.hub_cli("devices").stdout)
 
+    # The web app's files at /: public, confined to web_dir, app routes get index.html.
+
+    def web_get(self, path):
+        conn = http.client.HTTPConnection("127.0.0.1", self.port, timeout=10)
+        conn.request("GET", path)
+        resp = conn.getresponse()
+        body = resp.read()
+        conn.close()
+        return resp.status, resp.getheader("Content-Type"), body
+
+    def test_web(self):
+        self.assertEqual(self.web_get("/")[0::2], (200, b"<!doctype html>app"))
+        self.assertEqual(self.web_get("/agents/infra@hub1")[2], b"<!doctype html>app")  # an app route
+        status, ctype, _ = self.web_get("/canvaskit.wasm")
+        self.assertEqual((status, ctype), (200, "application/wasm"))
+        self.assertTrue(self.web_get("/main.dart.js")[1].startswith("text/javascript"))
+        self.assertEqual(self.web_get("/assets/a.json")[0], 200)
+        self.assertEqual(self.web_get("/missing.js")[0], 404)
+        for bad in ("/../secret.txt", "/%2e%2e/secret.txt", "/assets/../../secret.txt", "/..%2fsecret.txt"):
+            status, _, body = self.web_get(bad)
+            self.assertNotIn(b"outside the web folder", body, bad)
+        # /v1 is still the API, with its own auth
+        self.assertEqual(self.request("GET", "/v1/agents")[0], 401)
+
 
 class ListenTest(unittest.TestCase):
     def test_refuses_public_and_wildcard(self):
@@ -361,6 +394,9 @@ class ListenTest(unittest.TestCase):
                 self.assertIn("roster-hub: listen", out.stderr)
         finally:
             shutil.rmtree(tmp)
+
+
+
 
 
 if __name__ == "__main__":
