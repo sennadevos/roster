@@ -628,9 +628,56 @@ def agent_env():
     return ["-e", "PATH=" + path]
 
 
+def trust_key(cwd):
+    """The folder Claude Code keys its trust on: the repository root (the main
+    checkout for a worktree), or the folder itself outside a repository."""
+    proc = run(["git", "-C", cwd, "rev-parse", "--path-format=absolute", "--git-common-dir"])
+    common = proc.stdout.strip()
+    if proc.returncode == 0 and common:
+        if os.path.basename(common) == ".git":
+            return os.path.realpath(os.path.dirname(common))
+        top = run(["git", "-C", cwd, "rev-parse", "--show-toplevel"]).stdout.strip()
+        if top:
+            return os.path.realpath(top)
+    return os.path.realpath(cwd)
+
+
+def trust_folder(cwd):
+    """Record Claude Code's folder trust for an agent's folder, as accepting its
+    "Do you trust this folder?" dialog would, so a new agent does not sit there.
+
+    Starting an agent in a folder is the decision to trust it; `trust = false`
+    in config.toml turns this off. The record lives in ~/.claude.json, which
+    every running Claude also rewrites (whole, through a temp file), so write it
+    the same way and check it stuck; if it is lost anyway the dialog just shows.
+    """
+    if config().get("trust") is False:
+        return
+    path = os.path.expanduser("~/.claude.json")
+    key = trust_key(cwd)
+    for _ in range(3):
+        try:
+            with open(path) as f:
+                data = json.load(f)
+        except FileNotFoundError:
+            data = {}
+        except (OSError, ValueError):
+            time.sleep(0.2)  # caught mid-write
+            continue
+        project = data.setdefault("projects", {}).setdefault(key, {})
+        if project.get("hasTrustDialogAccepted"):
+            return
+        project["hasTrustDialogAccepted"] = True
+        # Claude's own format: indent 2, no ASCII escaping, no trailing newline.
+        write_atomic(path, json.dumps(data, indent=2, ensure_ascii=False))
+        os.chmod(path, 0o600)
+        time.sleep(0.2)
+
+
 def start_session(name, cwd, claude_args):
     """A detached tmux session running claude in cwd; returns its session id."""
     ensure_server()
+    trust_folder(cwd)
     pane = tmux("new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "-c", cwd,
                 *agent_env(), *agent_argv(claude_args)).split()[0]
     tmux("set-option", "-t", pane, "@roster", name)
