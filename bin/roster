@@ -1340,10 +1340,23 @@ def cmd_attach(args):
         return
     name, mach = split_target(args.target)
     where = locate(check_name(name), mach)
+    # From a terminal (an SSH session, say), show it right here; a window only
+    # from the desktop (keybinding, tray) or with --window.
+    here = not args.window and sys.stdin.isatty() and sys.stdout.isatty()
     if where[0] == "remote":
+        if here:
+            sys.stdout.flush()
+            argv = ssh_argv(peer(where[1]), "attach", name, *(["--steal"] if args.steal else []), tty=True)
+            os.execv(argv[0], argv)
         print(attach_remote(where[1], where[2]))
         return
     e, a = where[1], matched.get(name)
+    if here:
+        if a is None or backend(e) != "tmux":
+            raise Fail("%s is not a live tmux agent; `roster resume %s` brings a gone one back" % (name, name))
+        if a["attached"] and not args.steal:
+            raise Fail("%s is already open in a window; --steal moves it to this terminal" % name)
+        attach_here(e["pane_id"], steal=args.steal)
     print(attach(e, a))
 
 
@@ -1447,12 +1460,18 @@ def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False):
     return entry
 
 
-def attach_here(pane):
-    """Become the tmux client for a session, in the terminal roster runs in."""
+def attach_here(pane, steal=False):
+    """Become the tmux client for a session, in the terminal roster runs in.
+
+    With steal, other clients are detached first (their windows close), so a
+    session is still never shown twice.
+    """
     sys.stdout.flush()
     env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
+    if not has_terminfo(env.get("TERM", "")):
+        env["TERM"] = "xterm-256color"  # e.g. xterm-kitty over SSH from a machine with kitty
     exe = tool("tmux")
-    os.execve(exe, [exe, "-L", TMUX_SOCKET, "attach-session", "-t", pane], env)
+    os.execve(exe, [exe, "-L", TMUX_SOCKET, "attach-session", *(["-d"] if steal else []), "-t", pane], env)
 
 
 def cmd_kill(args):
@@ -2327,7 +2346,7 @@ def cmd_rpc(args):
                 results.append({"to": to, "result": wake(sender, target, matched.get(to))})
             out = {"results": results}
         elif verb == "attach":
-            return rpc_attach(check_name(rest[0]))
+            return rpc_attach(check_name(rest[0]), steal="--steal" in rest)
         elif verb == "new":
             p = json.load(sys.stdin)
             e = new_agent(p.get("cwd") or "~", p.get("name"), p.get("role"), p.get("prompt"),
@@ -2373,19 +2392,15 @@ def has_terminfo(term):
                os.path.exists(os.path.join(d, "%02x" % ord(term[:1]), term)) for d in dirs if term)
 
 
-def rpc_attach(name):
+def rpc_attach(name, steal=False):
     """Become the tmux client for one of this machine's agents, over the peer's SSH terminal."""
     matched = reconcile()
     e, a = load(name), matched.get(name)
     if not e or backend(e) != "tmux" or a is None:
         sys.exit("roster: no live tmux agent %s on %s" % (name, machine()))
-    if a["attached"]:
-        sys.exit("roster: %s is already attached" % name)
-    env = {k: v for k, v in os.environ.items() if k not in ("TMUX", "TMUX_PANE")}
-    if not has_terminfo(env.get("TERM", "")):
-        env["TERM"] = "xterm-256color"  # this machine may not know the far terminal (xterm-kitty)
-    exe = tool("tmux")
-    os.execve(exe, [exe, "-L", TMUX_SOCKET, "attach-session", "-t", e["pane_id"]], env)
+    if a["attached"] and not steal:
+        sys.exit("roster: %s is already open in a window; --steal moves it here" % name)
+    attach_here(e["pane_id"], steal=steal)
 
 
 # --- events: a line whenever the roster here changes -------------------------
@@ -2925,8 +2940,10 @@ def main():
     s.add_argument("--no-attach", action="store_true", help="leave it detached")
     s.set_defaults(fn=cmd_new)
 
-    s = sub.add_parser("attach", help="focus an agent's window, or open one")
+    s = sub.add_parser("attach", help="show an agent: in this terminal, or (from the desktop) in its window")
     s.add_argument("target", help="agent name, or a wildcard filter")
+    s.add_argument("--window", action="store_true", help="open or focus its window even from a terminal")
+    s.add_argument("--steal", action="store_true", help="take it over here when it is open in a window")
     s.set_defaults(fn=cmd_attach)
 
     s = sub.add_parser("kill", help="end a tmux agent's session")
