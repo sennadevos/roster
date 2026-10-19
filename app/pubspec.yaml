@@ -6,15 +6,18 @@ version: 0.1.0+1
 environment:
   sdk: ^3.13.5
 
-# Exact versions, looked up on pub.dev on 2026-10-18; pubspec.lock pins the rest.
+# Exact versions, looked up on pub.dev on 2026-10-18 (fetch_client and web on
+# 2026-10-19); pubspec.lock pins the rest.
 dependencies:
   flutter:
     sdk: flutter
+  fetch_client: 1.2.1
   flutter_local_notifications: 22.3.2
   flutter_markdown_plus: 1.0.12
   flutter_secure_storage: 11.2.0
   http: 1.6.0
   unifiedpush: 6.2.0
+  web: 1.1.1
 
 dev_dependencies:
   flutter_test:

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import '../models/agent.dart';
@@ -33,6 +34,11 @@ Uri normalizeHubUrl(String raw) {
   }
   return Uri.parse(s);
 }
+
+/// The hub that served the web app at [page] (`Uri.base`): the page's
+/// directory, query and fragment dropped, which is its origin when the app
+/// is served at `/`.
+Uri hubUrlForPage(Uri page) => normalizeHubUrl(page.resolve('.').toString());
 
 /// The roster-hub API, section 2 of docs/hub-api.md.
 class HubClient {
@@ -175,7 +181,9 @@ class HubClient {
             'Accept': 'text/event-stream',
             'Cache-Control': 'no-cache',
             'Last-Event-ID': ?lastEventId,
-          });
+          })
+          // fetch's keepalive is for short requests that outlive the page.
+          ..persistentConnection = !kIsWeb;
         try {
           final res = await client.send(req).timeout(_timeout);
           if (res.statusCode != 200) {
