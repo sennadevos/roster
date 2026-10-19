@@ -2180,28 +2180,49 @@ def read_transcript(session_id, after=None, limit=200, before=None):
 
 
 def read_screen(e):
-    """The agent's terminal text now, and the numbered choice dialog on it if there is one."""
+    """The agent's terminal text now, and the choice dialog on it if there is one.
+
+    A Claude dialog sits at the bottom of the screen, above a footer such as
+    "Enter to select · … · Esc to cancel": its numbered options are the last
+    run that starts at 1 above that footer, each with an optional description
+    on the lines below it. A question that takes several answers shows tick
+    boxes ([ ] / [✔]); a form of several questions shows a tab bar
+    (← ☐ One ☒ Two ✔ Submit →), moved through with Left and Right.
+    """
     text = tmux("capture-pane", "-p", "-t", e["pane_id"])
     lines = [re.sub(r"^[\s│┃|]+|[\s│┃|]+$", "", l) for l in text.splitlines()]
+    foot = max((n for n, l in enumerate(lines) if "Esc to cancel" in l or l.startswith("Enter to ")), default=None)
+    if foot is None:
+        return text, None
     opts, first = [], None
-    for n, line in enumerate(lines):
-        m = re.match(r"^(?:❯\s*)?(\d)\.\s+(.+)$", line)
-        if m:
-            if not opts or int(m.group(1)) == int(opts[-1]["key"]) + 1:
-                if not opts:
-                    first = n
-                opts.append({"key": m.group(1), "label": m.group(2).strip()})
-                continue
-        if opts and line and not m:
-            # A wrapped option label continues on the next line; anything after
-            # a blank line or the footer ends the list.
-            if line.startswith(("Enter to", "Esc to")) or not lines[n - 1]:
-                break
-            opts[-1]["label"] += " " + line
-    dialog = None
-    if len(opts) >= 2 and opts[0]["key"] == "1":
-        title = next((l for l in reversed(lines[:first]) if l and not re.match(r"^[─━╌-]+$", l)), "")
-        dialog = {"title": title, "options": opts}
+    for n in range(foot):
+        line = lines[n]
+        m = re.match(r"^(?:❯\s*)?(\d+)\.\s+(.+)$", line)
+        if m and m.group(1) == "1":
+            opts, first = [], n  # a new run; the last one above the footer is the dialog
+        if m and opts is not None and (m.group(1) == "1" or (opts and int(m.group(1)) == int(opts[-1]["key"]) + 1)):
+            label, checked = m.group(2).strip(), None
+            box = re.match(r"^\[( |✔|✓|x|X)\]\s*(.*)$", label)
+            if box:
+                checked, label = box.group(1) != " ", box.group(2)
+            opt = {"key": m.group(1), "label": label, "detail": ""}
+            if checked is not None:
+                opt["checked"] = checked
+            opts.append(opt)
+        elif opts and line and not re.match(r"^[─━╌-]{3,}$", line):
+            opts[-1]["detail"] = (opts[-1]["detail"] + " " + line).strip()
+    if len(opts) < 2:
+        return text, None
+    above = [l for l in lines[:first] if l and not re.match(r"^[─━╌-]{3,}$", l)]
+    tabs = []
+    bar = next((l for l in reversed(above) if "Submit" in l and ("←" in l or "→" in l)), None)
+    if bar:
+        tabs = [{"label": t.strip(), "done": mark == "☒"} for mark, t in re.findall(r"([☐☒✔])\s*([^☐☒✔←→]+)", bar)]
+    title = next((l for l in reversed(above) if l != bar), "")
+    dialog = {"title": title, "options": opts, "multi": any("checked" in o for o in opts)}
+    if tabs:
+        dialog["tabs"] = tabs
+        dialog["actions"] = [{"label": "Back", "keys": ["Left"]}, {"label": "Next", "keys": ["Right"]}]
     return text, dialog
 
 

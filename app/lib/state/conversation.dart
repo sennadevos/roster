@@ -145,7 +145,7 @@ class Conversation extends ChangeNotifier {
   }
 
   Future<void> answer(DialogOption option) async {
-    await client.keys(agent, [option.key]);
+    await client.keys(agent, option.keys);
     screen = null;
     _changed();
     // The status event follows; this catches a second dialog right away.

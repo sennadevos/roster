@@ -38,7 +38,7 @@ What is on the agent's terminal now, and the dialog if one is open.
             "options": [{"key": "1", "label": "Yes"}, {"key": "2", "label": "Yes, and don't ask again …"}, {"key": "3", "label": "No, and tell Claude what to do differently"}]}}
 ```
 
-`dialog` is `null` unless a numbered choice list (`❯ 1. …`, `2. …`) is on screen. `key` is the key that picks the option.
+`dialog` is `null` unless a Claude choice dialog is on screen (numbered options above an `Esc to cancel` footer). `key` is the key that picks the option, `detail` its description. A question that takes several answers has `"multi": true` and a `checked` flag per option (the key toggles it). A form of several questions has `tabs` (`[{"label", "done"}]`) and `actions` (`[{"label": "Back", "keys": ["Left"]}, {"label": "Next", "keys": ["Right"]}]`) to move between them; its last tab offers Submit and Cancel as options.
 
 ### `roster prompt <agent> [text | -]`
 

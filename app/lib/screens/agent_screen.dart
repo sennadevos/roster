@@ -262,7 +262,20 @@ class _DialogCardState extends State<DialogCard> {
                 Text('Blocked, but no choice is on its screen.', style: TextStyle(color: cs.onErrorContainer)),
                 TextButton(onPressed: widget.onRefresh, child: const Text('Look again')),
               ] else ...[
+                if (dialog.tabs.isNotEmpty) ...[
+                  Wrap(spacing: 6, runSpacing: 4, children: [
+                    for (final t in dialog.tabs)
+                      Chip(
+                        visualDensity: VisualDensity.compact,
+                        avatar: Icon(t.done ? Icons.check_circle : Icons.radio_button_unchecked, size: 16),
+                        label: Text(t.label),
+                      ),
+                  ]),
+                  const SizedBox(height: 8),
+                ],
                 Text(dialog.title, style: theme.textTheme.titleSmall?.copyWith(color: cs.onErrorContainer)),
+                if (dialog.multi)
+                  Text('Tick one or more, then Next.', style: theme.textTheme.bodySmall?.copyWith(color: cs.onErrorContainer)),
                 const SizedBox(height: 8),
                 for (final o in dialog.options)
                   Padding(
@@ -270,9 +283,32 @@ class _DialogCardState extends State<DialogCard> {
                     child: FilledButton.tonal(
                       onPressed: _busy ? null : () => _pick(o),
                       style: FilledButton.styleFrom(alignment: Alignment.centerLeft),
-                      child: Text('${o.key}. ${o.label}'),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 6),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Text('${o.checked == null ? '' : o.checked! ? '☑ ' : '☐ '}${o.key}. ${o.label}'),
+                            if (o.detail.isNotEmpty)
+                              Text(o.detail, style: theme.textTheme.bodySmall),
+                          ],
+                        ),
+                      ),
                     ),
                   ),
+                if (dialog.actions.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Row(children: [
+                    for (final a in dialog.actions)
+                      Padding(
+                        padding: const EdgeInsets.only(right: 8),
+                        child: FilledButton(
+                          onPressed: _busy ? null : () => _pick(a),
+                          child: Text(a.label),
+                        ),
+                      ),
+                  ]),
+                ],
               ],
             ],
           ),

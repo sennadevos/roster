@@ -17,27 +17,70 @@ class Screen {
       );
 }
 
+/// A choice dialog on an agent's screen. A form of several questions has
+/// [tabs] and [actions] (Back and Next) to move between them; a question that
+/// takes several answers has tick boxes ([DialogOption.checked]).
 class ScreenDialog {
-  const ScreenDialog({required this.title, required this.options});
+  const ScreenDialog({required this.title, required this.options, this.multi = false,
+      this.tabs = const [], this.actions = const []});
 
   final String title;
   final List<DialogOption> options;
+  final bool multi;
+  final List<DialogTab> tabs;
+  final List<DialogOption> actions;
 
   factory ScreenDialog.fromJson(Map<String, dynamic> json) => ScreenDialog(
         title: json['title'] as String? ?? '',
+        multi: json['multi'] == true,
         options: [
           for (final o in (json['options'] as List? ?? const []))
-            if (o is Map) DialogOption(key: '${o['key']}', label: '${o['label'] ?? ''}'),
+            if (o is Map)
+              DialogOption(
+                key: '${o['key']}',
+                label: '${o['label'] ?? ''}',
+                detail: '${o['detail'] ?? ''}',
+                checked: o['checked'] is bool ? o['checked'] as bool : null,
+              ),
+        ],
+        tabs: [
+          for (final t in (json['tabs'] as List? ?? const []))
+            if (t is Map) DialogTab(label: '${t['label'] ?? ''}', done: t['done'] == true),
+        ],
+        actions: [
+          for (final a in (json['actions'] as List? ?? const []))
+            if (a is Map)
+              DialogOption(
+                key: '',
+                label: '${a['label'] ?? ''}',
+                actionKeys: [for (final k in (a['keys'] as List? ?? const [])) '$k'],
+              ),
         ],
       );
 }
 
 class DialogOption {
-  const DialogOption({required this.key, required this.label});
+  const DialogOption({required this.key, required this.label, this.detail = '', this.checked, this.actionKeys});
 
   /// The key that picks this option.
   final String key;
   final String label;
+  final String detail;
+
+  /// Ticked or not, on a question that takes several answers; null otherwise.
+  final bool? checked;
+  /// An action's own keys (Back, Next); null for an option, which is its number.
+  final List<String>? actionKeys;
+
+  /// The keys to send for it.
+  List<String> get keys => actionKeys ?? [key];
+}
+
+class DialogTab {
+  const DialogTab({required this.label, required this.done});
+
+  final String label;
+  final bool done;
 }
 
 /// A paired phone, from `GET /v1/devices`.

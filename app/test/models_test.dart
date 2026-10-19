@@ -71,6 +71,22 @@ void main() {
     expect(Screen.fromJson({'status': 'idle', 'text': '', 'dialog': null}).dialog, isNull);
   });
 
+  test('a form dialog: tick boxes, tabs and Back/Next', () {
+    final d = Screen.fromJson(jsonDecode('''
+      {"agent": "infra@m", "status": "blocked", "text": "…",
+       "dialog": {"title": "Where should incoming SMS be routed to?", "multi": true,
+                  "options": [{"key": "1", "label": "ntfy topic", "detail": "Push each SMS", "checked": true},
+                              {"key": "2", "label": "Mail", "detail": "", "checked": false}],
+                  "tabs": [{"label": "SMS target", "done": false}, {"label": "Submit", "done": false}],
+                  "actions": [{"label": "Back", "keys": ["Left"]}, {"label": "Next", "keys": ["Right"]}]}}''') as Map<String, dynamic>).dialog!;
+    expect(d.multi, isTrue);
+    expect(d.options.map((o) => o.checked), [true, false]);
+    expect(d.options.first.detail, 'Push each SMS');
+    expect(d.options.first.keys, ['1']);
+    expect(d.tabs.map((t) => t.label), ['SMS target', 'Submit']);
+    expect(d.actions.map((a) => a.keys), [['Left'], ['Right']]);
+  });
+
   test('devices and push payloads', () {
     final d = Device.fromJson({'id': 'd1', 'name': 'Pixel', 'created': 'x', 'last_seen': 'y', 'push': true, 'current': true});
     expect((d.id, d.push, d.current, d.lastSeen), ('d1', true, true, 'y'));
