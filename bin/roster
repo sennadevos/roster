@@ -711,8 +711,12 @@ def terminal(name, mach=None):
 
 
 def agent_window(name, mach=None):
+    """An agent's window: titled roster:<name>@<machine>, maybe with more after
+    a space (a status that something like niri-roster appends)."""
+    want = title(name, mach)
     for w in niri_json("windows") or []:
-        if w.get("title") == title(name, mach):
+        t = w.get("title") or ""
+        if t == want or t.startswith(want + " "):
             return w
     return None
 
