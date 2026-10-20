@@ -2197,7 +2197,13 @@ def read_screen(e):
     lines = [re.sub(r"^[\s│┃|]+|[\s│┃|]+$", "", l) for l in text.splitlines()]
     foot = max((n for n, l in enumerate(lines) if "Esc to cancel" in l or l.startswith("Enter to ")), default=None)
     if foot is None:
-        return text, None
+        # The footer can be cut off at the bottom of the screen. Then the
+        # selection cursor (❯ on a numbered option) near the bottom marks it.
+        cur = max((n for n, l in enumerate(lines) if re.match(r"^❯\s*\d+\.\s", l)), default=None)
+        last = max((n for n, l in enumerate(lines) if l), default=0)
+        if cur is None or last - cur > 15:
+            return text, None
+        foot = last + 1
     opts, first = [], None
     for n in range(foot):
         line = lines[n]
