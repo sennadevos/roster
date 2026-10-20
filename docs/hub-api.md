@@ -66,7 +66,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 |---|---|---|
 | `GET /v1/version` | | `{"hub": "0.3.0", "api": 1}` |
 | `POST /v1/pair` | `{"code", "device_name"}` | `{"token", "device_id"}` |
-| `GET /v1/agents` | `?all=1` for gone ones too | `{"agents": [row…], "machines": [{"name", "local": bool, "reachable": bool, "error"}]}`; a row is a `roster list --json` row plus `"agent": "name@machine"` |
+| `GET /v1/agents` | `?all=1` for gone ones too | `{"agents": [row…], "machines": [{"name", "local": bool, "reachable": bool, "error"}]}`; a row is a `roster list --json` row plus `"agent": "name@machine"`; a live row has `subagents`: `[{"id", "type", "label", "status": "running"|"done", "started_at", "ended_at"}]`, the subagents it runs (shown under it, never as agents; finished ones stay two minutes) |
 | `GET /v1/transcript` | `?agent=&after=&before=&limit=` | as `roster transcript --json` |
 | `GET /v1/screen` | `?agent=` | as `roster screen --json` |
 | `POST /v1/prompt` | `{"agent", "text"}` | `{"ok": true}` |
