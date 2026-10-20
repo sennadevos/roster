@@ -74,4 +74,5 @@ abstract final class Keys {
   static const deviceId = 'device_id';
   static const notifications = 'notifications';
   static const pushEndpoint = 'push_endpoint';
+  static const theme = 'theme';
 }

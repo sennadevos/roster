@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 
 import '../app.dart';
 import '../state/app_state.dart';
+import '../theme.dart';
+import '../widgets/status.dart' show friendlyError;
 
 /// Hub URL and the one-time code from `roster-hub pair`. On web the hub is
 /// the one that served the page, so only the code and a name are asked.
@@ -37,7 +39,7 @@ class _PairScreenState extends State<PairScreen> {
     try {
       await AppScope.read(context).pair(_url.text, _code.text, _name.text);
     } catch (e) {
-      if (mounted) setState(() => _error = '$e');
+      if (mounted) setState(() => _error = friendlyError(e));
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -53,22 +55,41 @@ class _PairScreenState extends State<PairScreen> {
       body: SafeArea(
         child: Center(
           child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 560),
+            constraints: const BoxConstraints(maxWidth: 480),
             child: Form(
           key: _form,
           child: ListView(
-            padding: const EdgeInsets.all(16),
+            padding: const EdgeInsets.fromLTRB(20, 24, 20, 20),
             children: [
+              Center(
+                child: Container(
+                  width: 56,
+                  height: 56,
+                  decoration: BoxDecoration(
+                    color: theme.colorScheme.primary,
+                    borderRadius: BorderRadius.circular(16),
+                  ),
+                  child: Icon(Icons.format_list_bulleted_rounded, color: theme.colorScheme.onPrimary, size: 30),
+                ),
+              ),
+              const SizedBox(height: 24),
               if (reason != null)
                 Padding(
                   padding: const EdgeInsets.only(bottom: 16),
                   child: Text(reason, style: TextStyle(color: theme.colorScheme.error)),
                 ),
-              Text(
-                  app.hubLocked
-                      ? 'Run `roster-hub pair` on the hub machine and enter the code it prints.\nHub: ${app.hubUrl}'
-                      : 'Run `roster-hub pair` on the hub machine and enter the code it prints.',
-                  style: theme.textTheme.bodyMedium),
+              Text.rich(
+                TextSpan(children: [
+                  const TextSpan(text: 'Run '),
+                  TextSpan(
+                    text: 'roster-hub pair',
+                    style: mono().copyWith(backgroundColor: theme.colorScheme.surfaceContainerHigh),
+                  ),
+                  const TextSpan(text: ' on the hub machine and enter the code it prints.'),
+                  if (app.hubLocked) TextSpan(text: '\nHub: ${app.hubUrl}', style: TextStyle(color: theme.colorScheme.outline)),
+                ]),
+                style: theme.textTheme.bodyMedium,
+              ),
               const SizedBox(height: 16),
               if (!app.hubLocked) ...[
                 TextFormField(

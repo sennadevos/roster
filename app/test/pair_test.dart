@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:roster/app.dart';
 import 'package:roster/state/app_state.dart';
 import 'package:roster/state/store.dart';
+import 'package:roster/widgets/status.dart';
 
 import 'fake_hub.dart';
 
@@ -29,7 +30,7 @@ void main() {
     await tester.tap(find.text('Pair'));
     await tester.pump();
     await tester.pump();
-    expect(find.text('bad code (403)'), findsOneWidget);
+    expect(find.text('Bad code.'), findsOneWidget);
     expect(store.values[Keys.token], isNull);
 
     await tester.enterText(find.byKey(const Key('code')), 'abcd2345');
@@ -55,12 +56,15 @@ void main() {
     await tester.pump();
     await tester.pump();
     expect(state.link, Link.live);
-    expect(find.text('infra'), findsOneWidget);
+    // Blocked: pinned under Needs you, with its machine.
+    expect(find.text('Needs you'), findsOneWidget);
+    expect(find.textContaining('infra'), findsOneWidget);
+    expect(find.textContaining('@srv'), findsOneWidget);
     expect(find.text('servers'), findsOneWidget);
-    expect(find.text('▲'), findsOneWidget);
-    expect(find.text('⚠'), findsOneWidget);
+    expect(find.byWidgetPredicate((w) => w is StatusDot && w.status == 'blocked'), findsOneWidget);
+    expect(find.text('API error (billing_error); needs you'), findsOneWidget);
     expect(find.text('3'), findsOneWidget);
-    expect(find.textContaining('unreachable: timed out'), findsOneWidget);
+    expect(find.textContaining('Unreachable: timed out'), findsOneWidget);
 
     state.dispose();
     await hub.events.close();

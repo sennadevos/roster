@@ -29,6 +29,20 @@ class Conversation extends ChangeNotifier {
   String? error;
   Screen? screen;
 
+  /// Prompts sent but not yet seen in the transcript, shown dimmed.
+  final List<String> pending = [];
+
+  /// An answer to the dialog went out; the screen has not shown the next
+  /// state yet.
+  bool answered = false;
+
+  /// Whether the tail was ever asked for, so a cached conversation is only
+  /// brought up to date when opened again.
+  bool started = false;
+
+  /// Text typed into the composer and not sent, kept when switching agents.
+  String draft = '';
+
   bool _fetching = false;
   bool _again = false;
   bool _disposed = false;
@@ -37,7 +51,17 @@ class Conversation extends ChangeNotifier {
     if (!_disposed) notifyListeners();
   }
 
+  /// The first time: the tail; after that, what is new.
+  Future<void> open() {
+    if (!started) {
+      started = true;
+      return loadTail();
+    }
+    return fetchNew();
+  }
+
   Future<void> loadTail() async {
+    started = true;
     loading = true;
     error = null;
     _changed();
@@ -46,6 +70,9 @@ class Conversation extends ChangeNotifier {
       messages
         ..clear()
         ..addAll(page.messages);
+      for (final m in page.messages) {
+        if (m.role == 'user') pending.remove(m.text.trim());
+      }
       sessionId = page.sessionId;
       next = page.next;
       hasOlder = page.messages.length >= pageSize || (page.messages.isNotEmpty && page.messages.first.i > 1);
@@ -112,6 +139,10 @@ class Conversation extends ChangeNotifier {
   }
 
   void _merge(List<Message> fresh) {
+    // A prompt shows up in the transcript as a user line: it is sent.
+    for (final m in fresh) {
+      if (m.role == 'user') pending.remove(m.text.trim());
+    }
     final at = {for (var k = 0; k < messages.length; k++) messages[k].key: k};
     for (final m in fresh) {
       final k = at[m.key];
@@ -138,24 +169,48 @@ class Conversation extends ChangeNotifier {
   Future<void> fetchScreen() async {
     try {
       screen = await client.screen(agent);
+      answered = false;
     } on HubException catch (e) {
       error = e.message;
     }
     _changed();
   }
 
+  /// Sends the keys for a dialog option. Ticking a box or moving between a
+  /// form's questions keeps the card and refreshes it; picking an answer
+  /// marks the dialog answered until the screen shows what comes next.
   Future<void> answer(DialogOption option) async {
+    final staysOpen = option.checked != null || option.actionKeys != null;
     await client.keys(agent, option.keys);
-    screen = null;
-    _changed();
-    // The status event follows; this catches a second dialog right away.
-    await Future<void>.delayed(const Duration(milliseconds: 700));
+    if (!staysOpen) {
+      answered = true;
+      _changed();
+    }
+    // The status event follows; this catches the next state right away.
+    await Future<void>.delayed(Duration(milliseconds: staysOpen ? 250 : 700));
     if (!_disposed) await fetchScreen();
   }
 
+  /// Sends a prompt. It shows at once as pending, and goes when the
+  /// transcript has it; on failure it is taken back and the error rethrown.
   Future<void> send(String text) async {
-    await client.prompt(agent, text);
-    unawaited(Future<void>.delayed(const Duration(seconds: 1), () => _disposed ? null : fetchNew()));
+    final t = text.trim();
+    pending.add(t);
+    _changed();
+    try {
+      await client.prompt(agent, t);
+    } catch (_) {
+      pending.remove(t);
+      _changed();
+      rethrow;
+    }
+    for (final wait in const [Duration(milliseconds: 600), Duration(seconds: 2), Duration(seconds: 5)]) {
+      await Future<void>.delayed(wait);
+      if (_disposed || !pending.contains(t)) return;
+      await fetchNew();
+    }
+    // Never seen (the transcript may word it differently): stop waiting.
+    if (pending.remove(t)) _changed();
   }
 
   @override

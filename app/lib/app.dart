@@ -6,6 +6,7 @@ import 'screens/agent_screen.dart';
 import 'screens/agents_screen.dart';
 import 'screens/pair_screen.dart';
 import 'state/app_state.dart';
+import 'theme.dart';
 
 final navigatorKey = GlobalKey<NavigatorState>();
 
@@ -36,7 +37,7 @@ void pushAgent(NavigatorState nav, String agent) {
   unawaited(nav
       .push(MaterialPageRoute<void>(
         settings: const RouteSettings(name: agentRouteName),
-        builder: (_) => AgentScreen(agent: agent),
+        builder: (_) => AgentScreen(agent: agent, ownPage: true),
       ))
       .then((_) {
     // Not when the window got wide and the agent moved beside the list.
@@ -56,11 +57,8 @@ class AppScope extends InheritedNotifier<AppState> {
       context.getInheritedWidgetOfExactType<AppScope>()!.notifier!;
 }
 
-ThemeData _theme(Brightness b) => ThemeData(
-      colorSchemeSeed: const Color(0xFF00796B),
-      brightness: b,
-      visualDensity: VisualDensity.standard,
-    );
+final _light = buildTheme(Brightness.light);
+final _dark = buildTheme(Brightness.dark);
 
 class RosterApp extends StatefulWidget {
   const RosterApp({super.key, required this.state});
@@ -100,17 +98,27 @@ class _RosterAppState extends State<RosterApp> {
   Widget build(BuildContext context) {
     return AppScope(
       state: widget.state,
-      child: MaterialApp(
-        title: 'Roster',
-        navigatorKey: navigatorKey,
-        theme: _theme(Brightness.light),
-        darkTheme: _theme(Brightness.dark),
-        home: ListenableBuilder(
+      child: ValueListenableBuilder<ThemeMode>(
+        valueListenable: widget.state.themeMode,
+        builder: (context, mode, home) => MaterialApp(
+          title: 'Roster',
+          debugShowCheckedModeBanner: false,
+          navigatorKey: navigatorKey,
+          theme: _light,
+          darkTheme: _dark,
+          themeMode: mode,
+          home: home,
+        ),
+        child: ListenableBuilder(
           listenable: widget.state,
           builder: (context, _) {
             final s = widget.state;
-            if (!s.loaded) return const Scaffold(body: Center(child: CircularProgressIndicator()));
-            return s.paired ? const AgentsScreen() : const PairScreen();
+            // Loading the token takes a moment: an empty page, not a spinner.
+            if (!s.loaded) return const Scaffold(body: SizedBox.expand());
+            return AnimatedSwitcher(
+              duration: const Duration(milliseconds: 250),
+              child: s.paired ? const AgentsScreen() : const PairScreen(),
+            );
           },
         ),
       ),

@@ -3,12 +3,21 @@ import 'package:flutter/material.dart';
 import '../app.dart';
 import '../widgets/status.dart';
 
-Future<void> showNewAgentSheet(BuildContext context) => showModalBottomSheet<void>(
-      context: context,
-      isScrollControlled: true,
-      useSafeArea: true,
-      builder: (_) => const NewAgentSheet(),
-    );
+/// A bottom sheet on a phone, a dialog on a wide window.
+Future<void> showNewAgentSheet(BuildContext context) => MediaQuery.sizeOf(context).width >= splitViewWidth
+    ? showDialog<void>(
+        context: context,
+        builder: (_) => const Dialog(
+          clipBehavior: Clip.antiAlias,
+          child: SizedBox(width: 560, child: NewAgentSheet()),
+        ),
+      )
+    : showModalBottomSheet<void>(
+        context: context,
+        isScrollControlled: true,
+        useSafeArea: true,
+        builder: (_) => const NewAgentSheet(),
+      );
 
 /// `POST /v1/new`: machine, directory, name, role and a first prompt.
 class NewAgentSheet extends StatefulWidget {
@@ -79,12 +88,15 @@ class _NewAgentSheetState extends State<NewAgentSheet> {
     return Padding(
       padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
       child: SingleChildScrollView(
-        padding: const EdgeInsets.all(16),
+        padding: const EdgeInsets.fromLTRB(20, 16, 20, 20),
         child: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
             Text('New agent', style: Theme.of(context).textTheme.titleLarge),
+            const SizedBox(height: 4),
+            Text('It starts on that machine and joins the roster.',
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(color: Theme.of(context).colorScheme.outline)),
             const SizedBox(height: 16),
             DropdownButtonFormField<String>(
               initialValue: machine,

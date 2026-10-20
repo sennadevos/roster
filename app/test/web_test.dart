@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:roster/api/hub_client.dart';
 import 'package:roster/app.dart';
+import 'package:roster/screens/agents_screen.dart';
 import 'package:roster/state/app_state.dart';
 import 'package:roster/state/store.dart';
 
@@ -119,20 +120,20 @@ void main() {
     await tester.pump();
     await tester.pump();
 
-    expect(find.text('Pick an agent on the left'), findsOneWidget);
+    expect(find.text('Nothing needs you right now'), findsOneWidget);
     await tester.tap(find.text('infra'));
     await tester.pumpAndSettle();
     // Both at once: the row in the list and the conversation with its composer.
     expect(find.text('Roster'), findsOneWidget);
-    expect(find.text('Prompt'), findsOneWidget);
+    expect(find.text('Message infra'), findsOneWidget);
     expect(AppState.onScreen, 'infra@srv');
-    expect(tester.widget<ListTile>(find.widgetWithText(ListTile, 'infra')).selected, isTrue);
+    expect(tester.widget<AgentTile>(find.byType(AgentTile)).selected, isTrue);
 
     // Narrow: the agent moves onto a page of its own over the list.
     tester.view.physicalSize = const Size(400, 800);
     await tester.pumpAndSettle();
     expect(find.text('Roster'), findsNothing);
-    expect(find.text('Prompt'), findsOneWidget);
+    expect(find.text('Message infra'), findsOneWidget);
     expect(find.byType(BackButton), findsOneWidget);
 
     // Back to the list, and wide again: nothing is open.
@@ -141,7 +142,7 @@ void main() {
     expect(selectedAgent.value, isNull);
     tester.view.physicalSize = const Size(1280, 800);
     await tester.pumpAndSettle();
-    expect(find.text('Pick an agent on the left'), findsOneWidget);
+    expect(find.text('Nothing needs you right now'), findsOneWidget);
 
     state.dispose();
     await hub.events.close();

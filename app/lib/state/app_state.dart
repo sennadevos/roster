@@ -3,10 +3,12 @@ import 'dart:convert';
 import 'dart:math';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
+import 'package:flutter/material.dart' show ThemeMode;
 import 'package:flutter/widgets.dart';
 
 import '../api/hub_client.dart';
 import '../models/agent.dart';
+import 'conversation.dart';
 import 'store.dart';
 
 enum Link { offline, connecting, live }
@@ -88,6 +90,41 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   bool get paired => client != null;
 
+  /// Light, dark or the system's; its own notifier, so changing it rebuilds
+  /// the app's theme without every agents event doing so.
+  final themeMode = ValueNotifier<ThemeMode>(ThemeMode.system);
+
+  /// Agents waiting on the user, for the window title.
+  int get needsYou => snapshot.agents.where((a) => a.needsYou && a.stale == null).length;
+
+  /// The last few conversations opened, kept so going back to an agent shows
+  /// it at once and only fetches what is new.
+  final Map<String, Conversation> _conversations = {};
+  static const _keepConversations = 12;
+
+  Conversation conversation(String agent) {
+    var c = _conversations.remove(agent);
+    c ??= Conversation(client!, agent);
+    _conversations[agent] = c;
+    while (_conversations.length > _keepConversations) {
+      final oldest = _conversations.keys.first;
+      _conversations.remove(oldest)!.dispose();
+    }
+    return c;
+  }
+
+  void _dropConversations() {
+    for (final c in _conversations.values) {
+      c.dispose();
+    }
+    _conversations.clear();
+  }
+
+  Future<void> setThemeMode(ThemeMode mode) async {
+    themeMode.value = mode;
+    await store.write(Keys.theme, mode.name);
+  }
+
   int _gen = 0;
   String? _lastEventId;
   Completer<void>? _wake;
@@ -100,6 +137,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final token = await store.read(Keys.token);
     deviceId = await store.read(Keys.deviceId);
     notifications = (await store.read(Keys.notifications)) != 'off';
+    final theme = await store.read(Keys.theme);
+    themeMode.value = ThemeMode.values.where((m) => m.name == theme).firstOrNull ?? ThemeMode.system;
     if (token != null) client = _clientFor(hubUrl, token);
     loaded = true;
     notifyListeners();
@@ -137,6 +176,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     await store.write(Keys.token, null);
     await store.write(Keys.deviceId, null);
     client = null;
+    _dropConversations();
     deviceId = null;
     snapshot = const AgentsSnapshot();
     haveSnapshot = false;
@@ -151,6 +191,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final token = await store.read(Keys.token);
     if (token != null) {
       client = _clientFor(hubUrl, token);
+      _dropConversations();
       _stop();
       _start();
     }
@@ -295,6 +336,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   @override
   void dispose() {
     _stop();
+    _dropConversations();
     super.dispose();
   }
 }

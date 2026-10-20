@@ -7,7 +7,9 @@ environment:
   sdk: ^3.13.5
 
 # Exact versions, looked up on pub.dev on 2026-10-18 (fetch_client and web on
-# 2026-10-19); pubspec.lock pins the rest.
+# 2026-10-19, markdown on 2026-10-20: already locked through
+# flutter_markdown_plus, named here because the code blocks use its types);
+# pubspec.lock pins the rest.
 dependencies:
   flutter:
     sdk: flutter
@@ -16,6 +18,7 @@ dependencies:
   flutter_markdown_plus: 1.0.12
   flutter_secure_storage: 11.2.0
   http: 1.6.0
+  markdown: 7.3.1
   unifiedpush: 6.2.0
   web: 1.1.1
 
@@ -33,3 +36,12 @@ dependency_overrides:
 
 flutter:
   uses-material-design: true
+  # JetBrains Mono 2.304 (SIL OFL, fonts/JetBrainsMono/OFL.txt), from
+  # github.com/JetBrains/JetBrainsMono/releases, for code and tool calls:
+  # on the web `monospace` would fall back to Roboto.
+  fonts:
+    - family: JetBrainsMono
+      fonts:
+        - asset: fonts/JetBrainsMono/JetBrainsMono-Regular.ttf
+        - asset: fonts/JetBrainsMono/JetBrainsMono-SemiBold.ttf
+          weight: 600

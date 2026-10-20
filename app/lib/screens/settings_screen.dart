@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 
 import '../app.dart';
+import '../models/agent.dart' show parseStamp;
 import '../models/misc.dart';
 import '../platform/platform.dart' show pushAvailable;
 import '../state/app_state.dart';
@@ -12,6 +13,12 @@ class SettingsScreen extends StatefulWidget {
 
   @override
   State<SettingsScreen> createState() => _SettingsScreenState();
+}
+
+/// A device's last-seen stamp as a relative time, when it parses.
+String _seen(String raw) {
+  final t = parseStamp(raw);
+  return t == null ? raw : (ago(t) == 'now' ? 'just now' : '${ago(t)} ago');
 }
 
 class _SettingsScreenState extends State<SettingsScreen> {
@@ -39,7 +46,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
         });
       }
     } catch (e) {
-      if (mounted) setState(() => _devicesError = '$e');
+      if (mounted) setState(() => _devicesError = friendlyError(e));
     }
   }
 
@@ -109,6 +116,24 @@ class _SettingsScreenState extends State<SettingsScreen> {
               // On web the hub is the one that served the page.
               onTap: app.hubLocked ? null : _editUrl,
             ),
+            ListTile(
+              leading: const Icon(Icons.palette_outlined),
+              title: const Text('Appearance'),
+              trailing: ValueListenableBuilder<ThemeMode>(
+                valueListenable: app.themeMode,
+                builder: (context, mode, _) => SegmentedButton<ThemeMode>(
+                  showSelectedIcon: false,
+                  style: const ButtonStyle(visualDensity: VisualDensity.compact),
+                  segments: const [
+                    ButtonSegment(value: ThemeMode.system, label: Text('System')),
+                    ButtonSegment(value: ThemeMode.light, label: Text('Light')),
+                    ButtonSegment(value: ThemeMode.dark, label: Text('Dark')),
+                  ],
+                  selected: {mode},
+                  onSelectionChanged: (s) => app.setThemeMode(s.first),
+                ),
+              ),
+            ),
             if (pushAvailable)
               SwitchListTile(
               secondary: const Icon(Icons.notifications_outlined),
@@ -132,7 +157,7 @@ class _SettingsScreenState extends State<SettingsScreen> {
                   leading: Icon(d.current ? Icons.smartphone : Icons.phone_android_outlined),
                   title: Text(d.current ? '${d.name} (this $deviceNoun)' : d.name),
                   subtitle: Text([
-                    if (d.lastSeen != null) 'last seen ${d.lastSeen}',
+                    if (d.lastSeen != null) 'last seen ${_seen(d.lastSeen!)}',
                     if (d.push) 'push',
                   ].join(' · ')),
                   trailing: IconButton(

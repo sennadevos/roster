@@ -2,17 +2,8 @@
 <html>
 <head>
   <!--
-    If you are serving your web app in a path other than the root, change the
-    href value below to reflect the base path you are serving from.
-
-    The path provided below has to start and end with a slash "/" in order for
-    it to work correctly.
-
-    For more details:
-    * https://developer.mozilla.org/en-US/docs/Web/HTML/Element/base
-
-    This is a placeholder for base href that will be replaced by the value of
-    the `--base-href` argument provided to `flutter build`.
+    The path the app is served at; `flutter build web --base-href` fills it
+    in. It has to start and end with a slash.
   -->
   <base href="$FLUTTER_BASE_HREF">
 
@@ -20,29 +11,37 @@
   <meta content="IE=Edge" http-equiv="X-UA-Compatible">
   <meta name="description" content="The roster's agents, their conversations and dialogs.">
 
-  <!-- iOS meta tags & icons -->
   <meta name="mobile-web-app-capable" content="yes">
   <meta name="apple-mobile-web-app-status-bar-style" content="black">
   <meta name="apple-mobile-web-app-title" content="Roster">
   <link rel="apple-touch-icon" href="icons/Icon-192.png">
 
-  <!-- Favicon -->
-  <link rel="icon" type="image/png" href="favicon.png"/>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <link rel="icon" type="image/png" href="favicon.png" sizes="32x32">
 
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <meta name="theme-color" content="#00796B">
+  <meta name="color-scheme" content="light dark">
+  <meta name="theme-color" content="#FAFCFC" media="(prefers-color-scheme: light)">
+  <meta name="theme-color" content="#111516" media="(prefers-color-scheme: dark)">
   <title>Roster</title>
   <link rel="manifest" href="manifest.json">
+  <!--
+    Shown while the engine loads (a second or two), in the app's own
+    background colour, so the page is never a white flash; removed by
+    flutter_bootstrap.js once the app runs.
+  -->
+  <style>
+    html, body { margin: 0; height: 100%; background: #FAFCFC; }
+    @media (prefers-color-scheme: dark) { html, body { background: #111516; } }
+    #splash { position: fixed; inset: 0; display: grid; place-items: center; transition: opacity .25s ease; }
+    #splash img { width: 56px; height: 56px; animation: breathe 1.6s ease-in-out infinite; }
+    #splash.gone { opacity: 0; }
+    @keyframes breathe { 0%, 100% { opacity: .55; transform: scale(.96); } 50% { opacity: 1; transform: scale(1); } }
+    @media (prefers-reduced-motion: reduce) { #splash img { animation: none; } }
+  </style>
 </head>
 <body>
-  <!--
-    You can customize the "flutter_bootstrap.js" script.
-    This is useful to provide a custom configuration to the Flutter loader
-    or to give the user feedback during the initialization process.
-
-    For more details:
-    * https://docs.flutter.dev/platform-integration/web/initialization
-  -->
+  <div id="splash" aria-hidden="true"><img src="favicon.svg" alt=""></div>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>

@@ -8,6 +8,12 @@ class Stalled {
   final String? message;
   final bool gaveUp;
 
+  /// API errors that clear by themselves (roster's TRANSIENT): the agent
+  /// resumes when the API answers, so they do not need the user.
+  static const transientErrors = {'rate_limit', 'overloaded', 'server_error', 'unknown'};
+
+  bool get transient => !gaveUp && transientErrors.contains(error);
+
   static Stalled? fromJson(Object? json) {
     if (json is! Map) return null;
     return Stalled(
@@ -16,6 +22,46 @@ class Stalled {
       gaveUp: json['gave_up'] == true,
     );
   }
+}
+
+/// A Claude subagent an agent runs, from a row's `subagents`. Shown under
+/// its agent, never as an agent of its own.
+class Subagent {
+  const Subagent({required this.id, required this.type, required this.label, required this.running,
+      this.startedAt, this.endedAt});
+
+  final String id;
+
+  /// `general-purpose`, `Explore` and the like.
+  final String type;
+
+  /// The first line of its task.
+  final String label;
+  final bool running;
+  final DateTime? startedAt;
+  final DateTime? endedAt;
+
+  static List<Subagent> listFromJson(Object? json) => [
+        if (json is List)
+          for (final s in json)
+            if (s is Map)
+              Subagent(
+                id: '${s['id'] ?? ''}',
+                type: '${s['type'] ?? 'subagent'}',
+                label: '${s['label'] ?? ''}',
+                running: s['status'] != 'done',
+                startedAt: parseStamp(s['started_at']),
+                endedAt: parseStamp(s['ended_at']),
+              ),
+      ];
+}
+
+/// Roster's stamps look like `2026-10-18T16:32:11+0200`, which
+/// DateTime.parse does not take without the colon in the offset.
+DateTime? parseStamp(Object? raw) {
+  if (raw is! String || raw.isEmpty) return null;
+  final fixed = raw.replaceFirstMapped(RegExp(r'([+-]\d\d)(\d\d)$'), (m) => '${m[1]}:${m[2]}');
+  return DateTime.tryParse(fixed)?.toLocal();
 }
 
 /// One row of `GET /v1/agents`: a `roster list --json` row plus `agent`.
@@ -31,6 +77,11 @@ class Agent {
     this.local = false,
     this.stalled,
     this.stale,
+    this.statusAt,
+    this.model,
+    this.effort,
+    this.temp = false,
+    this.subagents = const [],
     required this.fingerprint,
   });
 
@@ -48,10 +99,31 @@ class Agent {
   /// Set when the row is the last one known from an unreachable machine.
   final String? stale;
 
+  /// When the status last changed (or when it ended).
+  final DateTime? statusAt;
+  final String? model;
+  final String? effort;
+
+  /// A quick agent, started for one job.
+  final bool temp;
+  final List<Subagent> subagents;
+
   /// The row as JSON, to tell whether anything about the agent changed.
   final String fingerprint;
 
   bool get ended => status == 'gone' || status == 'left';
+
+  /// Waits on the user: a dialog on screen, or an API error that will not
+  /// clear by itself.
+  bool get needsYou => !ended && (status == 'blocked' || (stalled != null && !stalled!.transient));
+
+  /// The last part of the name; the rest is the leads above it.
+  String get leaf => name.split('/').last;
+
+  /// `rator-firmware/` for `rator-firmware/ui`, empty for a lead.
+  String get parentPrefix => name.contains('/') ? name.substring(0, name.lastIndexOf('/') + 1) : '';
+
+  int get depth => '/'.allMatches(name).length;
 
   factory Agent.fromJson(Map<String, dynamic> json) {
     final name = '${json['name'] ?? '?'}';
@@ -67,6 +139,11 @@ class Agent {
       local: json['local'] == true,
       stalled: Stalled.fromJson(json['stalled']),
       stale: json['stale'] is String ? json['stale'] as String : null,
+      statusAt: parseStamp(json['ended_at']) ?? parseStamp(json['status_at']),
+      model: json['model'] is String ? json['model'] as String : null,
+      effort: json['effort'] is String ? json['effort'] as String : null,
+      temp: json['temp'] == true,
+      subagents: Subagent.listFromJson(json['subagents']),
       fingerprint: jsonEncode(json),
     );
   }

@@ -1,3 +1,5 @@
+import 'agent.dart' show parseStamp;
+
 /// One entry of `GET /v1/transcript`.
 class Message {
   const Message({
@@ -28,19 +30,11 @@ class Message {
         i: (json['i'] as num).toInt(),
         role: json['role'] as String? ?? 'assistant',
         text: json['text'] as String? ?? '',
-        at: _parseTime(json['at']),
+        at: parseStamp(json['at']),
         tool: json['tool'] as String?,
         result: json['result'] as String?,
         error: json['error'] == true,
       );
-}
-
-/// The contract's stamps look like `2026-10-18T16:32:11+0200`, which
-/// DateTime.parse does not take without the colon in the offset.
-DateTime? _parseTime(Object? raw) {
-  if (raw is! String || raw.isEmpty) return null;
-  final fixed = raw.replaceFirstMapped(RegExp(r'([+-]\d\d)(\d\d)$'), (m) => '${m[1]}:${m[2]}');
-  return DateTime.tryParse(fixed)?.toLocal();
 }
 
 class TranscriptPage {
