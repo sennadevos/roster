@@ -1870,7 +1870,124 @@ def move(target, live):
     return "moved %s from herdr pane %s to tmux %s (%s)" % (e["name"], a["pane_id"], e["pane_id"], short_path(e["cwd"]))
 
 
+def move_to(name, mach):
+    """Move an idle tmux agent to a peer: its conversation goes along and it
+    resumes there under the same name, role, model and effort, with its unread
+    mail. Its folder must already exist there (moving the files is up to you).
+    If the peer fails to take it, it is resumed here again."""
+    import base64
+    import io
+    import tarfile
+    matched = reconcile()
+    e, a = load(name), matched.get(name)
+    if not e or backend(e) != "tmux" or a is None:
+        raise Fail("%s is not a live tmux agent here" % name)
+    if e.get("status") not in ("idle", "done"):
+        raise Fail("%s is %s; move it when it is idle" % (name, e.get("status")))
+    if user_is_on(e, a) or not prompt_is_empty(e):
+        raise Fail("%s is in use (its window is focused, or its input holds text)" % name)
+    peer(mach)
+    rpc(mach, "adopt-check", data={"name": name, "cwd": e["cwd"]})
+    tpath = transcript_path(e["session_id"])
+    pdir = os.path.dirname(tpath)
+    tmux("kill-session", "-t", e["pane_id"])
+    time.sleep(1)  # let Claude finish writing the transcript
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w:gz") as tar:
+        for rel in (os.path.basename(tpath), e["session_id"], "memory"):
+            if os.path.exists(os.path.join(pdir, rel)):
+                tar.add(os.path.join(pdir, rel), arcname=rel)
+    mail = []
+    for fname in unread(name):
+        try:
+            with open(os.path.join(inbox(name, "new"), fname)) as f:
+                mail.append(json.load(f))
+        except (OSError, ValueError):
+            pass
+    e = load(name) or e
+    payload = {"name": name, "role": e.get("role"), "session_id": e["session_id"], "cwd": e["cwd"],
+               "model": e.get("model"), "effort": e.get("effort"), "project": os.path.basename(pdir),
+               "tar": base64.b64encode(buf.getvalue()).decode(), "mail": mail, "machine": machine()}
+    try:
+        rpc(mach, "adopt", data=payload, timeout=300)
+    except Fail as exc:
+        resume_in_tmux(e)
+        raise Fail("%s did not take it (%s); resumed here again" % (mach, exc))
+    forget(e)
+    return "moved %s to %s@%s (%d KB of conversation, %d unread)" % (name, name, mach, len(buf.getvalue()) // 1024, len(mail))
+
+
+def adopt(p, check_only=False):
+    """The far side of `move --to`: take an agent over and resume it here."""
+    import base64
+    import io
+    import tarfile
+    name = check_name(p["name"])
+    old = load(name)
+    if old and old.get("status") not in ENDED:
+        raise Fail("%s is already a live agent on %s" % (name, machine()))
+    cwd = p["cwd"]
+    if not os.path.isdir(cwd):
+        raise Fail("%s does not exist on %s; move the folder first" % (cwd, machine()))
+    if check_only:
+        return {"ok": True}
+    project = p["project"]
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", project):
+        raise Fail("bad project folder %r" % project)
+    pdir = os.path.join(os.path.expanduser("~/.claude/projects"), project)
+    os.makedirs(pdir, exist_ok=True)
+    with tempfile.TemporaryDirectory() as tmp:
+        with tarfile.open(fileobj=io.BytesIO(base64.b64decode(p["tar"])), mode="r:gz") as tar:
+            tar.extractall(tmp, filter="data")
+        for rel in os.listdir(tmp):
+            src, dst = os.path.join(tmp, rel), os.path.join(pdir, rel)
+            if rel == "memory":
+                # Notes for the project: add what is missing, never overwrite.
+                for root, _, files in os.walk(src):
+                    for fname in files:
+                        to = os.path.join(dst, os.path.relpath(os.path.join(root, fname), src))
+                        if not os.path.exists(to):
+                            os.makedirs(os.path.dirname(to), exist_ok=True)
+                            shutil.copy2(os.path.join(root, fname), to)
+            elif os.path.isdir(src):
+                shutil.copytree(src, dst, dirs_exist_ok=True)
+            else:
+                shutil.copy2(src, dst)
+    if old:
+        unindex_session(old.get("session_id"))
+    e = {"name": name, "role": p.get("role"), "backend": "tmux", "harness": "claude",
+         "session_id": p["session_id"], "pane_id": None, "workspace_id": None, "tab_id": None,
+         "cwd": cwd, "joined_at": now(), "status": "gone", "status_at": now(),
+         "ended_at": now(), "end_reason": "moved"}
+    for key in ("model", "effort"):
+        if p.get(key):
+            e[key] = p[key]
+    save(e)
+    ensure_maildir(name)
+    for m in p.get("mail") or []:
+        # Mail from agents local to the old machine came from there.
+        sender_machine = m.get("from_machine") or p.get("machine")
+        deliver(m.get("from"), name, m.get("body", ""), m.get("in_reply_to"), m.get("to_filter"),
+                m.get("id"), None if sender_machine == machine() else sender_machine)
+    index_session(e["session_id"], name)
+    resume_in_tmux(e)
+    return {"name": name, "cwd": short_path(cwd)}
+
+
 def cmd_move(args):
+    if args.to:
+        if not args.targets:
+            raise Fail("move --to needs the names of the agents to move")
+        failed = 0
+        for name in args.targets:
+            try:
+                print(move_to(check_name(name), args.to))
+            except Fail as exc:
+                failed += 1
+                print("%s: not moved: %s" % (name, exc))
+        if failed:
+            raise Fail("%d of %d not moved" % (failed, len(args.targets)))
+        return
     live = herdr("agent", "list").get("agents", [])
     if args.idle:
         targets = [a["pane_id"] for a in live if a.get("agent") == "claude"
@@ -2391,6 +2508,8 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb in ("adopt", "adopt-check"):
+            out = adopt(json.load(sys.stdin), check_only=verb == "adopt-check")
         elif verb == "kill":
             out = {"name": kill_local(check_name(rest[0]))}
         elif verb == "events":
@@ -2988,8 +3107,9 @@ def main():
     s.add_argument("--no-attach", action="store_true", help="do not open a window")
     s.set_defaults(fn=cmd_resume)
 
-    s = sub.add_parser("move", help="move idle herdr Claude agents into roster tmux sessions")
-    s.add_argument("targets", nargs="*", metavar="target", help="roster name, herdr pane id or herdr agent name")
+    s = sub.add_parser("move", help="move idle agents to another machine (--to), or herdr agents into tmux")
+    s.add_argument("targets", nargs="*", metavar="target", help="roster name (with --to), or herdr pane id or agent name")
+    s.add_argument("--to", metavar="MACHINE", help="move these agents, conversation and all, to a peer machine")
     s.add_argument("--idle", action="store_true", help="every idle, unfocused Claude agent in herdr")
     s.set_defaults(fn=cmd_move)
 
