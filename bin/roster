@@ -2970,6 +2970,8 @@ def note_subagent(name, data, event):
         with open(path) as f:
             rec = json.load(f)
     except (OSError, ValueError):
+        if event != "SubagentStart":
+            return  # a stop whose start we never saw (the hooks came later): nothing to show
         rec = {"id": aid, "type": data.get("agent_type") or "agent", "started_at": now(), "label": None}
     if event == "SubagentStart":
         rec["status"] = "running"
