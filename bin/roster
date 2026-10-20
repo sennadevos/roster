@@ -81,8 +81,8 @@ def _hook_fast_path():
         if not name:
             sys.exit(0)
         adir = os.path.join(state, "agents", name.replace("/", "%"))
-        work = event in ("Stop", "PostToolUse", "UserPromptSubmit") and os.listdir(
-            os.path.join(adir, "inbox", "new"))
+        work = event in ("SubagentStart", "SubagentStop") or (
+            event in ("Stop", "PostToolUse", "UserPromptSubmit") and os.listdir(os.path.join(adir, "inbox", "new")))
         if not work and event in ("UserPromptSubmit", "Stop", "StopFailure", "Notification",
                                   "PermissionRequest", "PostToolUse"):
             # tmux agents take their status from these hooks. PostToolUse runs on
@@ -994,6 +994,8 @@ def list_rows(args, remote=True):
     for e in rows:
         e["unread"] = len(unread(e["name"]))
         e.update(machine=me_, local=True)
+        if e.get("status") not in ENDED:
+            e["subagents"] = subagents_of(e["name"])
         if backend(e) == "tmux" and e["name"] in matched:
             e["attached"] = matched[e["name"]]["attached"] > 0
     rows.sort(key=lambda e: e["name"].split("/"))
@@ -1099,6 +1101,11 @@ def render_list(rows, color=False, width=None):
                      "pane %s" % e.get("pane_id")]
         where = " · ".join(place + [e.get("harness") or "-", short_path(e.get("cwd"))])
         lines.append(indent + paint("2", clip(where, (width or 0) - len(indent))))
+        for sa in e.get("subagents") or []:
+            done = sa.get("status") == "done"
+            line = "↳ %s · %s · %s" % (sa.get("type") or "agent", sa.get("label") or "starting",
+                                       "done" if done else "running " + ago(sa.get("started_at")))
+            lines.append(indent + paint("2" if done else "36", clip(line, (width or 0) - len(indent))))
     return lines
 
 
@@ -2770,7 +2777,7 @@ def peer_accept(args):
 # --- install ---------------------------------------------------------------
 
 HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PostToolUse", "Stop", "StopFailure",
-               "Notification", "PermissionRequest", "SessionEnd")
+               "Notification", "PermissionRequest", "SessionEnd", "SubagentStart", "SubagentStop")
 
 TMUX_SERVICE = """[Unit]
 Description=tmux server holding the roster's agent sessions
@@ -2947,6 +2954,89 @@ def relink(session_id, source):
     return e
 
 
+# Subagents an agent runs (Claude Code's Agent tool) are shown under it, never
+# as agents of their own: one small file each, from the SubagentStart and
+# SubagentStop hooks. Finished ones linger a moment so a short one is seen.
+SUBAGENT_LINGER = 120
+SUBAGENT_TTL = 6 * 3600  # a record whose stop never came
+
+
+def note_subagent(name, data, event):
+    aid = str(data.get("agent_id") or "")
+    if not re.fullmatch(r"[A-Za-z0-9_-]{1,100}", aid):
+        return
+    path = os.path.join(agent_dir(name), "subagents", aid + ".json")
+    try:
+        with open(path) as f:
+            rec = json.load(f)
+    except (OSError, ValueError):
+        rec = {"id": aid, "type": data.get("agent_type") or "agent", "started_at": now(), "label": None}
+    if event == "SubagentStart":
+        rec["status"] = "running"
+        tp = data.get("transcript_path")
+        if tp:
+            rec["transcript"] = os.path.join(os.path.splitext(tp)[0], "subagents",
+                                             "agent-%s.jsonl" % aid.removeprefix("agent-"))
+    else:
+        rec.update(status="done", ended_at=now())
+        if not rec.get("label") and data.get("agent_transcript_path"):
+            rec["transcript"] = data["agent_transcript_path"]
+    write_atomic(path, json.dumps(rec))
+
+
+def subagent_label(path):
+    """The first line of the task a subagent was given: the first user text in its transcript."""
+    try:
+        with open(os.path.expanduser(path)) as f:
+            for line in f:
+                try:
+                    rec = json.loads(line)
+                except ValueError:
+                    continue
+                if rec.get("type") == "user":
+                    text = block_text((rec.get("message") or {}).get("content")).strip()
+                    if text:
+                        first = text.splitlines()[0]
+                        return first[:80] + ("…" if len(first) > 80 else "")
+    except OSError:
+        pass
+    return None
+
+
+def subagents_of(name):
+    """An agent's subagents now: running ones, and ones that finished a moment ago."""
+    d = os.path.join(agent_dir(name), "subagents")
+    try:
+        files = os.listdir(d)
+    except OSError:
+        return []
+    out = []
+    for fname in files:
+        path = os.path.join(d, fname)
+        try:
+            with open(path) as f:
+                rec = json.load(f)
+        except (OSError, ValueError):
+            continue
+        stamp = rec.get("ended_at") if rec.get("status") == "done" else rec.get("started_at")
+        try:
+            age = time.time() - datetime.strptime(stamp, "%Y-%m-%dT%H:%M:%S%z").timestamp()
+        except (TypeError, ValueError):
+            age = 0
+        if age > (SUBAGENT_LINGER if rec.get("status") == "done" else SUBAGENT_TTL):
+            try:
+                os.remove(path)
+            except OSError:
+                pass
+            continue
+        if not rec.get("label") and rec.get("transcript"):
+            rec["label"] = subagent_label(rec["transcript"])
+            if rec["label"]:
+                write_atomic(path, json.dumps(rec))
+        out.append({k: rec.get(k) for k in ("id", "type", "label", "status", "started_at", "ended_at")})
+    return sorted(out, key=lambda r: r.get("started_at") or "")
+
+
 def hook_status(name, session_id, event, data, stop_blocked):
     """tmux agents: record the status the hook event implies. herdr agents get theirs from herdr."""
     e = load(name)
@@ -2990,7 +3080,14 @@ def cmd_hook(args):
         data = json.load(sys.stdin)
     except ValueError:
         return
-    if not isinstance(data, dict) or data.get("agent_id"):
+    if not isinstance(data, dict):
+        return
+    if args.event in ("SubagentStart", "SubagentStop"):
+        name = name_for_session(data.get("session_id"))
+        if name:
+            note_subagent(name, data, args.event)
+        return
+    if data.get("agent_id"):
         return  # subagents share the session_id but are not roster members
     session_id = data.get("session_id")
     event = args.event
@@ -3018,6 +3115,7 @@ def cmd_hook(args):
         return
 
     if event == "SessionEnd":
+        shutil.rmtree(os.path.join(agent_dir(name), "subagents"), ignore_errors=True)
         e = load(name)
         if e and e.get("session_id") == session_id and e.get("temp"):
             forget(e)
