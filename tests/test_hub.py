@@ -159,7 +159,9 @@ class HubTest(unittest.TestCase):
     # --- tests ---
 
     def test_version_needs_no_token(self):
-        self.assertEqual(self.request("GET", "/v1/version"), (200, {"hub": "0.3.0", "api": 1}))
+        status, got = self.request("GET", "/v1/version")
+        self.assertEqual((status, got["hub"], got["api"]), (200, "0.3.0", 1))
+        self.assertTrue(got["web"].isdigit())  # the web build served, for the app's update banner
 
     def test_unknown_path_is_404_json(self):
         status, got = self.request("GET", "/v1/nothing", token=self.token)
