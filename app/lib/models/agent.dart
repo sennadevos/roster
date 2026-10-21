@@ -113,6 +113,9 @@ class Agent {
 
   bool get ended => status == 'gone' || status == 'left';
 
+  /// No process, still on the roster: opening, prompting or mailing it resumes it.
+  bool get parked => status == 'parked';
+
   /// Waits on the user: a dialog on screen, or an API error that will not
   /// clear by itself.
   bool get needsYou => !ended && (status == 'blocked' || (stalled != null && !stalled!.transient));

@@ -223,6 +223,8 @@ class _ListModel {
         a.machine.toLowerCase().contains(q);
     needs = searching ? [] : app.snapshot.agents.where((a) => a.needsYou && a.stale == null).toList();
     final pinned = needs.map((a) => a.id).toSet();
+    parked = [for (final a in app.snapshot.agents) if (a.parked && match(a)) a]..sort((a, b) => a.name.compareTo(b.name));
+    pinned.addAll(parked.map((a) => a.id));
     groups = [
       for (final (m, agents) in app.snapshot.grouped())
         if (!searching || agents.any(match)) (m, agents.where((a) => match(a) && !pinned.contains(a.id)).toList()),
@@ -234,6 +236,7 @@ class _ListModel {
   }
 
   final bool recent;
+  late final List<Agent> parked;
   late final List<Agent> recentAgents;
   late final bool searching;
   late final List<Agent> needs;
@@ -348,6 +351,20 @@ class _AgentList extends StatelessWidget {
               ),
             for (final a in agents) tile(a),
           ],
+          if (model.parked.isNotEmpty)
+            Theme(
+              data: theme.copyWith(dividerColor: Colors.transparent),
+              child: ExpansionTile(
+                key: const PageStorageKey('parked'),
+                tilePadding: const EdgeInsets.symmetric(horizontal: 16),
+                leading: Icon(Icons.pause_circle_outline, size: 18, color: cs.outline),
+                title: Text('Parked (${model.parked.length})',
+                    style: theme.textTheme.labelLarge?.copyWith(color: cs.outline)),
+                subtitle: Text('No process running; you can read them, and sending one a message resumes it.',
+                    style: theme.textTheme.bodySmall?.copyWith(color: cs.outline)),
+                children: [for (final a in model.parked) tile(a, showMachine: true, indent: false)],
+              ),
+            ),
         ],
       );
     }

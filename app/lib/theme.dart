@@ -60,7 +60,7 @@ class StatusColors extends ThemeExtension<StatusColors> {
         'blocked' => blocked,
         'done' => done,
         'idle' => idle,
-        'gone' || 'left' => ended,
+        'gone' || 'left' || 'parked' => ended,
         _ => unknown,
       };
 

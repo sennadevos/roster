@@ -301,6 +301,7 @@ class _AgentScreenState extends State<AgentScreen> {
                     controller: _input,
                     focusNode: _inputFocus,
                     agentName: row?.name ?? widget.agent.split('@').first,
+                    parked: row?.parked ?? false,
                     disabledReason: ended
                         ? 'This agent has ended.'
                         : stale
@@ -1143,6 +1144,7 @@ class _Composer extends StatelessWidget {
     required this.agentName,
     required this.onSend,
     this.disabledReason,
+    this.parked = false,
     this.onResume,
   });
 
@@ -1151,6 +1153,9 @@ class _Composer extends StatelessWidget {
   final String agentName;
   final VoidCallback onSend;
   final String? disabledReason;
+
+  /// A parked agent: sending resumes it first, which takes a few seconds.
+  final bool parked;
   final VoidCallback? onResume;
 
   @override
@@ -1197,7 +1202,12 @@ class _Composer extends StatelessWidget {
                           textCapitalization: TextCapitalization.sentences,
                           style: theme.textTheme.bodyMedium,
                           decoration: InputDecoration(
-                            hintText: disabledReason ?? (kIsWeb && MediaQuery.sizeOf(context).width >= 600 ? 'Message $agentName  ·  Shift+Enter for a new line' : 'Message $agentName'),
+                            hintText: disabledReason ??
+                                (parked
+                                    ? 'Parked: sending resumes $agentName'
+                                    : kIsWeb && MediaQuery.sizeOf(context).width >= 600
+                                        ? 'Message $agentName  ·  Shift+Enter for a new line'
+                                        : 'Message $agentName'),
                             hintMaxLines: 1,
                             border: InputBorder.none,
                             enabledBorder: InputBorder.none,

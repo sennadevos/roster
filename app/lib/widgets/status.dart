@@ -14,6 +14,7 @@ String statusWord(String status) => switch (status) {
       'idle' => 'idle',
       'gone' => 'gone',
       'left' => 'left',
+      'parked' => 'parked',
       _ => 'starting',
     };
 
@@ -123,6 +124,10 @@ class _DotPainter extends CustomPainter {
         canvas.drawLine(c.translate(d, -d), c.translate(-d, d), stroke);
       case 'left':
         canvas.drawLine(c.translate(-r * 0.7, 0), c.translate(r * 0.7, 0), stroke);
+      case 'parked':
+        // Two bars: paused.
+        canvas.drawLine(c.translate(-r * 0.35, -r * 0.6), c.translate(-r * 0.35, r * 0.6), stroke);
+        canvas.drawLine(c.translate(r * 0.35, -r * 0.6), c.translate(r * 0.35, r * 0.6), stroke);
       default:
         // Starting or unknown: a dashed ring.
         const n = 8;
