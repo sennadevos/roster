@@ -2328,12 +2328,18 @@ def read_screen(e):
         if cur is None or last - cur > 15:
             return text, None
         foot = last + 1
-    opts, first = [], None
+    opts, first, cursor, field = [], None, None, None
     for n in range(foot):
         line = lines[n]
         m = re.match(r"^(?:❯\s*)?(\d+)\.\s+(.+)$", line)
         if m and m.group(1) == "1":
-            opts, first = [], n  # a new run; the last one above the footer is the dialog
+            opts, first, cursor, field = [], n, None, None  # a new run; the last one above the footer is the dialog
+        if m and line.startswith("❯"):
+            cursor = m.group(1)
+        if opts and field is None and re.match(r"^[─━╌-]{3,}$", line):
+            # Claude's own-answer field is the last option above the separator
+            # (below it only "Chat about this"); it shows what was typed in it.
+            field = opts[-1]["key"]
         if m and opts is not None and (m.group(1) == "1" or (opts and int(m.group(1)) == int(opts[-1]["key"]) + 1)):
             label, checked = m.group(2).strip(), None
             box = re.match(r"^\[( |✔|✓|x|X)\]\s*(.*)$", label)
@@ -2353,7 +2359,11 @@ def read_screen(e):
     if bar:
         tabs = [{"label": t.strip(), "done": mark == "☒"} for mark, t in re.findall(r"([☐☒✔])\s*([^☐☒✔←→]+)", bar)]
     title = next((l for l in reversed(above) if l != bar), "")
-    dialog = {"title": title, "options": opts, "multi": any("checked" in o for o in opts)}
+    for o in opts:
+        if o["key"] == field:
+            o["input"] = True
+            o["text"] = "" if re.match(r"^(Type something|Type your own answer)\.?$", o["label"]) else o["label"]
+    dialog = {"title": title, "options": opts, "multi": any("checked" in o for o in opts), "cursor": cursor}
     if tabs:
         dialog["tabs"] = tabs
         dialog["actions"] = [{"label": "Back", "keys": ["Left"]}, {"label": "Next", "keys": ["Right"]}]
@@ -2402,6 +2412,25 @@ def view_local(verb, name, args, data=None):
             raise Fail("%s has unsent text in its input" % name)
         paste(e, text)
         return {"ok": True}
+    if verb == "answer":
+        # Type an own answer into the dialog's free-text option and submit it.
+        _, dialog = read_screen(e)
+        key, answer = str(args.get("key")), " ".join(((data or {}).get("text") or "").split())
+        opt = next((o for o in (dialog or {}).get("options", []) if o["key"] == key), None)
+        if not opt or not opt.get("input"):
+            raise Fail("option %s of %s's dialog takes no text of its own" % (key, name))
+        if not answer:
+            raise Fail("empty answer")
+        steps = int(key) - int(dialog.get("cursor") or 1)
+        for _ in range(abs(steps)):
+            tmux("send-keys", "-t", e["pane_id"], "Down" if steps > 0 else "Up")
+            time.sleep(0.05)
+        if opt.get("text"):
+            tmux("send-keys", "-t", e["pane_id"], *(["BSpace"] * (len(opt["text"]) + 2)))
+        tmux("send-keys", "-t", e["pane_id"], "-l", answer)
+        time.sleep(0.15)
+        tmux("send-keys", "-t", e["pane_id"], "Enter")
+        return {"ok": True}
     if verb == "keys":
         keys = list(args.get("keys") or [])
         bad = [k for k in keys if k not in KEYS_OK]
@@ -2431,6 +2460,8 @@ def view(verb, target, args, data=None):
         extra += ["--limit", args.get("limit", 200)]
     elif verb == "keys":
         extra += list(args.get("keys") or [])
+    elif verb == "answer":
+        extra += [args["key"]]
     return rpc(where[1], verb, name, *extra, data=data, timeout=30)
 
 
@@ -2443,6 +2474,11 @@ def cmd_view(args):
     elif verb == "keys":
         opts = {"keys": args.keys}
     elif verb == "prompt":
+        data = {"text": sys.stdin.read() if args.text in (None, "-") else args.text}
+    elif verb == "answer":
+        if not re.fullmatch(r"\d{1,2}", args.option):
+            raise Fail("option is the number of the dialog's free-text option")
+        opts = {"key": args.option}
         data = {"text": sys.stdin.read() if args.text in (None, "-") else args.text}
     out = view(verb, args.agent, opts, data)
     if getattr(args, "json", False):
@@ -2521,7 +2557,7 @@ def cmd_rpc(args):
             out = {"name": kill_local(check_name(rest[0]))}
         elif verb == "events":
             return cmd_events(argparse.Namespace(machine=None, all=False))
-        elif verb in ("transcript", "screen", "prompt", "keys"):
+        elif verb in ("transcript", "screen", "prompt", "keys", "answer"):
             name, opts, data = check_name(rest[0]), {}, None
             if verb == "transcript":
                 for flag, key in (("--after", "after"), ("--before", "before"), ("--limit", "limit")):
@@ -2529,8 +2565,10 @@ def cmd_rpc(args):
                         opts[key] = int(rest[rest.index(flag) + 1])
             elif verb == "keys":
                 opts["keys"] = rest[1:]
-            elif verb == "prompt":
+            elif verb in ("prompt", "answer"):
                 data = json.load(sys.stdin)
+                if verb == "answer":
+                    opts["key"] = rest[1]
             out = view_local(verb, name, opts, data)
         else:
             raise Fail("unknown request %r" % verb)
@@ -3233,6 +3271,13 @@ def main():
     s = sub.add_parser("prompt", help="type a prompt into an agent as the user")
     s.add_argument("agent")
     s.add_argument("text", nargs="?", help="the prompt, or - / omitted for stdin")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("answer", help="type your own answer into a dialog's free-text option and submit it")
+    s.add_argument("agent")
+    s.add_argument("option", help="the number of the free-text option (\"Type something\")")
+    s.add_argument("text", nargs="?", help="the answer, or - / omitted for stdin")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_view)
 
