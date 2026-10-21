@@ -3027,6 +3027,20 @@ Description=tmux server holding the roster's agent sessions
 # what started them (the tray, a terminal, an SSH session). Stopping it ends
 # every tmux agent.
 ExecStart=%(tmux)s -L roster -f %(conf)s -D
+# In user.slice, which rootless podman also puts containers in, so one memory
+# limit (roster-limits.conf there) covers the agents and their builds, and
+# SSH, the hub and the desktop stay usable when they run out.
+Slice=user.slice
+"""
+
+LIMITS_CONF = """# Written by `roster install`: a memory limit for the agents (roster-tmux in
+# this slice) and the podman containers they run, so a runaway build is
+# throttled and then killed inside here instead of freezing the machine.
+# agent_memory_high / agent_memory_max in ~/.config/roster/config.toml.
+[Slice]
+MemoryHigh=%(high)s
+MemoryMax=%(max)s
+MemorySwapMax=%(swap)s
 """
 
 PARK_SERVICE = """[Unit]
@@ -3131,6 +3145,11 @@ def cmd_install(args):
     done = [put(conf_path, conf, args.check),
             put(os.path.join(units, TMUX_UNIT),
                 TMUX_SERVICE % {"tmux": tool("tmux"), "conf": conf_path}, args.check)]
+    limits = os.path.join(units, "user.slice.d", "roster-limits.conf")
+    done.append(put(limits, LIMITS_CONF % {
+        "high": config().get("agent_memory_high", "60%"),
+        "max": config().get("agent_memory_max", "75%"),
+        "swap": config().get("agent_swap_max", "2G")}, args.check))
     hours = config().get("park_after_hours", 8)
     if hours:
         done.append(put(os.path.join(units, "roster-park.service"),
