@@ -1484,18 +1484,21 @@ def plan_brief(brief):
     rows, _ = list_rows(argparse.Namespace(all=False, filter=None))
     agents = [{"name": r["name"], "machine": r.get("machine"), "folder": r.get("cwd"), "role": r.get("role")}
               for r in rows]
-    context = {"machines": machines, "agents": agents, "this_machine": machine()}
+    # The machine Senna sits at, where USB devices get plugged in: `desk` in
+    # config.toml, else this one.
+    desk = config().get("desk") or machine()
+    context = {"machines": machines, "agents": agents, "desk": desk}
     ask = (
         "You place a new Claude Code agent on Senna's agent roster. The brief below becomes its first prompt "
         "unchanged; you only decide where and how it runs. Rules: pick a machine from `machines`. Work that needs "
         "hardware plugged in (USB, serial, debug probes, flashing boards, cameras) goes to the machine Senna sits at, "
-        "%s (a laptop); other work goes where its project already lives, by folder or by related agents. "
+        "%s; other work goes where its project already lives, by folder or by related agents. "
         "Use an existing folder from that machine's list when the brief is about that project; otherwise a new "
         "folder <that machine's home>/Desktop/<short-kebab-name>, with new_folder true. The name must be free "
         "(not in `agents`), short and kebab-case; put it under a lead (lead/sub) only if the brief clearly works "
         "for that lead's project. Model: opus with effort high by default; sonnet or lower effort only for small, "
         "routine work; follow the brief if it asks for a model or effort. Confidences are 0..1.\n\n"
-        "Roster:\n%s\n\nBrief:\n%s" % (machine(), json.dumps(context, indent=1), brief))
+        "Roster:\n%s\n\nBrief:\n%s" % (desk, json.dumps(context, indent=1), brief))
     claude = tool("claude")
     proc = run([claude, "-p", "--strict-mcp-config", "--model", "sonnet", "--output-format", "json", "--tools", "",
                 "--json-schema", json.dumps(PLAN_SCHEMA), ask], timeout=180)
