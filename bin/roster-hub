@@ -981,6 +981,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def r_new(self):
         b = self.body
+        if b.get("brief") is not None:
+            # Paste a brief, get an agent: roster decides where and how.
+            brief = check_text(b.get("brief"), "brief", 64 * 1024, required=True)
+            if not brief.strip():
+                raise HttpError(400, "the brief is empty")
+            out = cli("new", "--brief", "-", "--no-attach", "--json", stdin=brief, timeout=240, as_json=True)
+            if not isinstance(out, dict) or not out.get("agent"):
+                raise HttpError(502, "roster new did not say what it started")
+            self.hub.wake.set()
+            return {"agent": out["agent"], "plan": out.get("plan")}
         mach = b.get("machine")
         if not isinstance(mach, str) or not MACHINE_RE.fullmatch(mach):
             raise HttpError(400, "machine must be a roster machine name")

@@ -19,7 +19,8 @@ Future<void> showNewAgentSheet(BuildContext context) => MediaQuery.sizeOf(contex
         builder: (_) => const NewAgentSheet(),
       );
 
-/// `POST /v1/new`: machine, directory, name, role and a first prompt.
+/// `POST /v1/new`: paste a brief and roster decides the rest, or choose
+/// machine, directory, name, role, model and effort yourself.
 class NewAgentSheet extends StatefulWidget {
   const NewAgentSheet({super.key});
 
@@ -33,6 +34,8 @@ class _NewAgentSheetState extends State<NewAgentSheet> {
   final _role = TextEditingController();
   final _prompt = TextEditingController();
   final _customModel = TextEditingController();
+  final _brief = TextEditingController();
+  bool _manual = false;
   String? _machine;
 
   /// null: the default model; [_other]: whatever is typed in [_customModel].
@@ -45,7 +48,7 @@ class _NewAgentSheetState extends State<NewAgentSheet> {
 
   @override
   void dispose() {
-    for (final c in [_cwd, _name, _role, _prompt, _customModel]) {
+    for (final c in [_cwd, _name, _role, _prompt, _customModel, _brief]) {
       c.dispose();
     }
     super.dispose();
@@ -74,8 +77,76 @@ class _NewAgentSheetState extends State<NewAgentSheet> {
     }
   }
 
+  Future<void> _createFromBrief() async {
+    final app = AppScope.read(context);
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    setState(() => _busy = true);
+    try {
+      final (agent, plan) = await app.client!.newFromBrief(_brief.text);
+      if (!mounted) return;
+      Navigator.of(context).pop();
+      openAgent(agent);
+      final folder = '${plan['folder'] ?? ''}'.replaceFirst(RegExp(r'^/(var/)?home/[^/]+'), '~');
+      messenger?.showSnackBar(SnackBar(
+        duration: const Duration(seconds: 8),
+        content: Text('$agent · $folder · ${plan['model'] ?? ''} ${plan['effort'] ?? ''}'
+            '${plan['why'] != null ? '\n${plan['why']}' : ''}'),
+      ));
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = false);
+    }
+  }
+
+  Widget _briefForm(BuildContext context) {
+    final theme = Theme.of(context);
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        Text('New agent', style: theme.textTheme.titleLarge),
+        const SizedBox(height: 4),
+        Text('Paste a brief. It becomes the agent\'s first prompt; roster picks the name, machine, folder, model and effort.',
+            style: theme.textTheme.bodySmall?.copyWith(color: theme.colorScheme.outline)),
+        const SizedBox(height: 16),
+        TextField(
+          controller: _brief,
+          autofocus: true,
+          minLines: 10,
+          maxLines: 20,
+          enabled: !_busy,
+          onChanged: (_) => setState(() {}),
+          decoration: const InputDecoration(
+            hintText: '# Task: …\n\nWhat it should do, the context it needs, any rules.',
+            border: OutlineInputBorder(),
+          ),
+        ),
+        const SizedBox(height: 16),
+        FilledButton.icon(
+          onPressed: _busy || _brief.text.trim().isEmpty ? null : _createFromBrief,
+          icon: _busy
+              ? const SizedBox.square(dimension: 18, child: CircularProgressIndicator(strokeWidth: 2))
+              : const Icon(Icons.auto_awesome, size: 18),
+          label: Text(_busy ? 'Reading the brief…' : 'Create agent'),
+        ),
+        const SizedBox(height: 4),
+        TextButton(
+          onPressed: _busy ? null : () => setState(() => _manual = true),
+          child: const Text('Choose everything myself'),
+        ),
+      ],
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
+    if (!_manual) {
+      return Padding(
+        padding: EdgeInsets.only(bottom: MediaQuery.viewInsetsOf(context).bottom),
+        child: SingleChildScrollView(padding: const EdgeInsets.fromLTRB(20, 16, 20, 12), child: _briefForm(context)),
+      );
+    }
     final app = AppScope.of(context);
     final machines = [
       for (final m in app.snapshot.machines)

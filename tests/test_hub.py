@@ -261,6 +261,15 @@ class HubTest(unittest.TestCase):
         for bad in (["C-c"], ["x"], ["Enter", "-t"], [], "Enter", [1], ["Up"] * 33):
             self.assertEqual(self.request("POST", "/v1/keys", {"agent": "infra@hub1", "keys": bad}, token=self.token)[0], 400, bad)
 
+    def test_new_from_brief(self):
+        status, got = self.request("POST", "/v1/new", {"brief": "# Task\nread out the MCU"}, token=self.token)
+        self.assertEqual(status, 200, got)
+        self.assertEqual(got["agent"], "fan-debug@laptop")
+        self.assertEqual(got["plan"]["machine"], "laptop")
+        self.assertIn({"argv": ["new", "--brief", "-", "--no-attach", "--json"], "stdin": "# Task\nread out the MCU"},
+                      self.calls())
+        self.assertEqual(self.request("POST", "/v1/new", {"brief": "  "}, token=self.token)[0], 400)
+
     def test_answer(self):
         status, _ = self.request("POST", "/v1/answer", {"agent": "infra@hub1", "key": "3", "text": "Green, actually"},
                                  token=self.token)

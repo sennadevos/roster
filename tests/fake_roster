@@ -59,6 +59,10 @@ def main():
     elif cmd in ("keys", "answer"):
         pass
     elif cmd == "new":
+        if "--brief" in argv:
+            print(json.dumps({"agent": "fan-debug@laptop", "name": "fan-debug", "machine": "laptop", "cwd": "~/Desktop/fan-debug",
+                              "plan": {"name": "fan-debug", "machine": "laptop", "why": "hardware"}}))
+            return
         name = next((a.split("=", 1)[1] for a in argv if a.startswith("--name=")), "ab12cd34")
         on = next(a.split("=", 1)[1] for a in argv if a.startswith("--on="))
         print(json.dumps({"agent": "%s@%s" % (name, on), "name": name, "machine": on,

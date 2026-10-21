@@ -1373,15 +1373,33 @@ def cmd_attach(args):
 
 def cmd_new(args):
     prompt = sys.stdin.read() if args.prompt == "-" else args.prompt
+    plan = None
+    if args.brief is not None:
+        # Paste a brief, get an agent: the brief is its first prompt, and a
+        # planner decides name, role, machine, folder, model and effort.
+        prompt = sys.stdin.read() if args.brief == "-" else args.brief
+        if not prompt.strip():
+            raise Fail("empty brief")
+        plan = plan_brief(prompt)
+        if args.dry_run:
+            print(json.dumps(plan, indent=2))
+            return
+        args.name = args.name or plan["name"]
+        args.role = args.role or plan["role"]
+        args.on = args.on or plan["machine"]
+        args.cwd = args.cwd or plan["folder"]
+        args.model = args.model or plan["model"]
+        args.effort = args.effort or plan["effort"]
+        args.mkdir = True
     if args.on and args.on != machine():
         if args.name:
             check_free(check_name(args.name))
         got = rpc(args.on, "new", data={"cwd": args.cwd, "name": args.name, "role": args.role,
                                         "prompt": prompt, "model": args.model, "effort": args.effort,
-                                        "temp": args.temp})
+                                        "temp": args.temp, "mkdir": getattr(args, "mkdir", False)})
         if args.json:
             print(json.dumps({"agent": "%s@%s" % (got["name"], args.on), "name": got["name"],
-                              "machine": args.on, "cwd": got["cwd"]}))
+                              "machine": args.on, "cwd": got["cwd"], "plan": plan}))
         else:
             print("started %s@%s in %s" % (got["name"], args.on, got["cwd"]))
         if args.no_attach:
@@ -1394,10 +1412,11 @@ def cmd_new(args):
         return
     if args.temp and args.no_attach:
         raise Fail("--temp ends with its window, so it needs one")
-    entry = new_agent(args.cwd, args.name, args.role, prompt, args.model, args.effort, args.temp)
+    entry = new_agent(args.cwd, args.name, args.role, prompt, args.model, args.effort, args.temp,
+                      mkdir=getattr(args, "mkdir", False))
     if args.json:
         print(json.dumps({"agent": "%s@%s" % (entry["name"], machine()), "name": entry["name"],
-                          "machine": machine(), "cwd": short_path(entry["cwd"])}))
+                          "machine": machine(), "cwd": short_path(entry["cwd"]), "plan": plan}))
     else:
         print("started %s in %s" % (entry["name"], short_path(entry["cwd"])))
     if args.no_attach:
@@ -1417,11 +1436,98 @@ def model_args(model, effort):
     return (["--model", model] if model else []) + (["--effort", effort] if effort else [])
 
 
-def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False):
+def local_folders():
+    """Where projects live on this machine: the folders in ~/Desktop."""
+    desk = os.path.expanduser("~/Desktop")
+    try:
+        names = sorted(n for n in os.listdir(desk) if not n.startswith(".") and os.path.isdir(os.path.join(desk, n)))
+    except OSError:
+        names = []
+    return {"machine": machine(), "home": os.path.realpath(os.path.expanduser("~")),
+            "folders": [os.path.realpath(os.path.join(desk, n)) for n in names]}
+
+
+PLAN_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "name": {"type": "string", "description": "roster name: lowercase, [a-z0-9][a-z0-9_-]*, short; a/b only to put it under an existing lead"},
+        "role": {"type": "string", "description": "one line another agent can act on: what it works on and where"},
+        "machine": {"type": "string"},
+        "folder": {"type": "string", "description": "absolute path of its working folder"},
+        "new_folder": {"type": "boolean"},
+        "model": {"type": "string", "enum": ["opus", "sonnet", "haiku", "fable"]},
+        "effort": {"type": "string", "enum": list(EFFORTS)},
+        "confidence": {"type": "object", "properties": {
+            "machine": {"type": "number"}, "folder": {"type": "number"}, "model": {"type": "number"}},
+            "required": ["machine", "folder", "model"]},
+        "why": {"type": "string", "description": "one short sentence on the machine and folder choice"},
+    },
+    "required": ["name", "role", "machine", "folder", "new_folder", "model", "effort", "confidence", "why"],
+}
+
+
+def plan_brief(brief):
+    """Decide where and how an agent for this brief runs.
+
+    The decider is a headless Claude (`claude -p`, no MCP servers) given the
+    brief and what the roster knows: the machines, every agent with its folder
+    and role, and the project folders on each machine. Each decision carries a
+    confidence, so a decider with its own confidence (a System One model) can
+    replace this one later. The result is checked before it is used.
+    """
+    machines = {machine(): local_folders()}
+    for m in peers():
+        try:
+            machines[m] = rpc(m, "folders", timeout=10)
+        except Fail:
+            pass
+    rows, _ = list_rows(argparse.Namespace(all=False, filter=None))
+    agents = [{"name": r["name"], "machine": r.get("machine"), "folder": r.get("cwd"), "role": r.get("role")}
+              for r in rows]
+    context = {"machines": machines, "agents": agents, "this_machine": machine()}
+    ask = (
+        "You place a new Claude Code agent on Senna's agent roster. The brief below becomes its first prompt "
+        "unchanged; you only decide where and how it runs. Rules: pick a machine from `machines`. Work that needs "
+        "hardware plugged in (USB, serial, debug probes, flashing boards, cameras) goes to the machine Senna sits at, "
+        "%s (a laptop); other work goes where its project already lives, by folder or by related agents. "
+        "Use an existing folder from that machine's list when the brief is about that project; otherwise a new "
+        "folder <that machine's home>/Desktop/<short-kebab-name>, with new_folder true. The name must be free "
+        "(not in `agents`), short and kebab-case; put it under a lead (lead/sub) only if the brief clearly works "
+        "for that lead's project. Model: opus with effort high by default; sonnet or lower effort only for small, "
+        "routine work; follow the brief if it asks for a model or effort. Confidences are 0..1.\n\n"
+        "Roster:\n%s\n\nBrief:\n%s" % (machine(), json.dumps(context, indent=1), brief))
+    claude = tool("claude")
+    proc = run([claude, "-p", "--strict-mcp-config", "--model", "sonnet", "--output-format", "json", "--tools", "",
+                "--json-schema", json.dumps(PLAN_SCHEMA), ask], timeout=180)
+    try:
+        plan = json.loads(proc.stdout)["structured_output"]
+    except (ValueError, KeyError, TypeError):
+        raise Fail("planning failed: %s" % ((proc.stderr or proc.stdout).strip()[-300:] or "no answer"))
+    if plan.get("machine") not in machines:
+        raise Fail("planner chose an unknown machine %r" % plan.get("machine"))
+    home = machines[plan["machine"]]["home"]
+    folder = os.path.normpath(plan.get("folder") or "")
+    if not folder.startswith(home + "/"):
+        raise Fail("planner chose a folder outside the home: %r" % folder)
+    plan["folder"] = folder
+    name = re.sub(r"[^a-z0-9/_-]+", "-", plan.get("name", "").lower()).strip("-/") or fresh_id()
+    taken = {a["name"] for a in agents}
+    base, n = name, 2
+    while name in taken or not all(LEVEL_RE.match(l) for l in name.split("/")):
+        name, n = "%s-%d" % (base.split("/")[-1][:28], n), n + 1
+    plan["name"] = name
+    return plan
+
+
+def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False, mkdir=False):
     """Start a Claude agent in a roster tmux session on this machine; return its entry."""
     cwd = os.path.realpath(os.path.expanduser(cwd or os.getcwd()))
     if not os.path.isdir(cwd):
-        raise Fail("no such directory: %s" % cwd)
+        home = os.path.realpath(os.path.expanduser("~"))
+        if mkdir and cwd.startswith(home + os.sep) and os.path.isdir(os.path.dirname(cwd)):
+            os.mkdir(cwd)  # a new project folder, one level under an existing one
+        else:
+            raise Fail("no such directory: %s" % cwd)
     scratch = not name
     if name:
         check_free(check_name(name))
@@ -2541,7 +2647,7 @@ def cmd_rpc(args):
         elif verb == "new":
             p = json.load(sys.stdin)
             e = new_agent(p.get("cwd") or "~", p.get("name"), p.get("role"), p.get("prompt"),
-                          p.get("model"), p.get("effort"), bool(p.get("temp")))
+                          p.get("model"), p.get("effort"), bool(p.get("temp")), mkdir=bool(p.get("mkdir")))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
         elif verb == "resume":
             reconcile()
@@ -2551,6 +2657,8 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "folders":
+            out = local_folders()
         elif verb in ("adopt", "adopt-check"):
             out = adopt(json.load(sys.stdin), check_only=verb == "adopt-check")
         elif verb == "kill":
@@ -3219,6 +3327,9 @@ def main():
     s.add_argument("--name", help="roster name (default: a random placeholder the agent renames)")
     s.add_argument("--role", help="its one-line role on the roster")
     s.add_argument("--prompt", help="first prompt, as if typed by the user; - reads stdin")
+    s.add_argument("--brief", help="paste a brief (- for stdin): it is the first prompt, and the name, role, "
+                   "machine, folder, model and effort are decided from it")
+    s.add_argument("--dry-run", action="store_true", help="with --brief: only show what would be chosen")
     s.add_argument("--model", help="Claude model: an alias (opus, sonnet, fable) or a full name")
     s.add_argument("--effort", choices=EFFORTS, help="Claude effort level")
     s.add_argument("--temp", action="store_true",

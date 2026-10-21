@@ -72,6 +72,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 | `POST /v1/prompt` | `{"agent", "text"}` | `{"ok": true}` |
 | `POST /v1/answer` | `{"agent", "key", "text"}`: type your own answer into the dialog's free-text option (`input: true`) and submit it | `{"ok": true}` |
 | `POST /v1/keys` | `{"agent", "keys": [...]}` | `{"ok": true}` |
+| `POST /v1/new` with `{"brief"}` | a pasted brief: it becomes the first prompt, and roster decides name, role, machine, folder (new under ~/Desktop when needed), model and effort | `{"agent", "plan": {"name", "role", "machine", "folder", "new_folder", "model", "effort", "confidence": {"machine", "folder", "model"}, "why"}}` |
 | `POST /v1/new` | `{"machine", "cwd", "name", "role", "prompt", "model", "effort"}` (all but `machine` optional; `effort` is `low`, `medium`, `high`, `xhigh` or `max`; `model` an alias such as `opus` or a full model name) | `{"agent"}` |
 | `POST /v1/resume` | `{"agent"}` | `{"ok": true}` |
 | `POST /v1/kill` | `{"agent"}` | `{"ok": true}` |

@@ -154,6 +154,13 @@ class HubClient {
     return '${json['agent']}';
   }
 
+  /// Starts an agent from a pasted brief; the hub decides where and how.
+  /// Answers its `name@machine` and the plan it followed.
+  Future<(String, Map<String, dynamic>)> newFromBrief(String brief) async {
+    final json = await _send('POST', '/v1/new', body: {'brief': brief});
+    return ('${json['agent']}', (json['plan'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{});
+  }
+
   Future<void> resume(String agent) => _send('POST', '/v1/resume', body: {'agent': agent});
 
   Future<void> kill(String agent) => _send('POST', '/v1/kill', body: {'agent': agent});
