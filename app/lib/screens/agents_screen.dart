@@ -69,7 +69,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
     });
   }
 
-  List<Agent> _order(AppState app) => _ListModel(app, _search.text).order;
+  List<Agent> _order(AppState app) => _ListModel(app, _search.text, recent: app.recentView).order;
 
   bool get _typing {
     final ctx = FocusManager.instance.primaryFocus?.context;
@@ -210,9 +210,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
 }
 
 /// What the list shows, in order: the agents that need the user, then each
-/// machine with the rest of its agents, all narrowed by the search.
+/// machine with the rest of its agents (or, in the recent view, every other
+/// agent by last activity), all narrowed by the search.
 class _ListModel {
-  _ListModel(AppState app, String query) {
+  _ListModel(AppState app, String query, {this.recent = false}) {
     final q = query.trim().toLowerCase();
     searching = q.isNotEmpty;
     bool match(Agent a) =>
@@ -226,9 +227,14 @@ class _ListModel {
       for (final (m, agents) in app.snapshot.grouped())
         if (!searching || agents.any(match)) (m, agents.where((a) => match(a) && !pinned.contains(a.id)).toList()),
     ];
-    order = [...needs, for (final g in groups) ...g.$2];
+    final epoch = DateTime.fromMillisecondsSinceEpoch(0);
+    recentAgents = [for (final g in groups) ...g.$2]
+      ..sort((a, b) => (b.statusAt ?? epoch).compareTo(a.statusAt ?? epoch));
+    order = recent ? [...needs, ...recentAgents] : [...needs, for (final g in groups) ...g.$2];
   }
 
+  final bool recent;
+  late final List<Agent> recentAgents;
   late final bool searching;
   late final List<Agent> needs;
   late final List<(Machine, List<Agent>)> groups;
@@ -266,7 +272,7 @@ class _AgentList extends StatelessWidget {
     final app = AppScope.of(context);
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final model = _ListModel(app, search.text);
+    final model = _ListModel(app, search.text, recent: app.recentView);
     final live = app.snapshot.agents.where((a) => !a.ended).length;
     final working = app.snapshot.agents.where((a) => a.status == 'working').length;
 
@@ -320,6 +326,16 @@ class _AgentList extends StatelessWidget {
             ),
             for (final a in model.needs) tile(a, showMachine: true, indent: false),
           ],
+          if (model.recent) ...[
+            if (model.needs.isNotEmpty)
+              _SectionHeader(
+                icon: Icons.history,
+                color: cs.outline,
+                title: 'By last activity',
+                count: model.recentAgents.length,
+              ),
+            for (final a in model.recentAgents) tile(a, showMachine: true, indent: false),
+          ] else
           for (final (machine, agents) in model.groups) ...[
             _MachineHeader(machine, count: agents.length),
             if (agents.isEmpty && machine.reachable)
@@ -385,10 +401,26 @@ class _AgentList extends StatelessWidget {
           const SizedBox(width: 4),
         ],
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(52),
+          preferredSize: const Size.fromHeight(96),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: _SearchField(controller: search, focus: searchFocus, onSubmitted: onSearchSubmitted),
+            child: Column(children: [
+              _SearchField(controller: search, focus: searchFocus, onSubmitted: onSearchSubmitted),
+              const SizedBox(height: 8),
+              SizedBox(
+                width: double.infinity,
+                child: SegmentedButton<bool>(
+                  showSelectedIcon: false,
+                  style: const ButtonStyle(visualDensity: VisualDensity.compact),
+                  segments: const [
+                    ButtonSegment(value: false, icon: Icon(Icons.dns_outlined, size: 16), label: Text('By machine')),
+                    ButtonSegment(value: true, icon: Icon(Icons.history, size: 16), label: Text('Recent')),
+                  ],
+                  selected: {app.recentView},
+                  onSelectionChanged: (s) => app.setRecentView(s.first),
+                ),
+              ),
+            ]),
           ),
         ),
       ),

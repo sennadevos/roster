@@ -80,6 +80,9 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String? pushProblem;
   bool showEnded = false;
 
+  /// The agent list by machine, or everything by last activity.
+  bool recentView = false;
+
   /// Why the app went back to the pair screen, when it was not the user.
   String? unpairedReason;
 
@@ -120,6 +123,12 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _conversations.clear();
   }
 
+  Future<void> setRecentView(bool on) async {
+    recentView = on;
+    notifyListeners();
+    await store.write(Keys.listView, on ? 'recent' : 'machines');
+  }
+
   Future<void> setThemeMode(ThemeMode mode) async {
     themeMode.value = mode;
     await store.write(Keys.theme, mode.name);
@@ -137,6 +146,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final token = await store.read(Keys.token);
     deviceId = await store.read(Keys.deviceId);
     notifications = (await store.read(Keys.notifications)) != 'off';
+    recentView = (await store.read(Keys.listView)) == 'recent';
     final theme = await store.read(Keys.theme);
     themeMode.value = ThemeMode.values.where((m) => m.name == theme).firstOrNull ?? ThemeMode.system;
     if (token != null) client = _clientFor(hubUrl, token);
