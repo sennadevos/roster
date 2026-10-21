@@ -152,6 +152,9 @@ LEVEL_RE = re.compile(r"^[a-z0-9][a-z0-9_-]{0,31}$")
 HERDR_NAME_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 SCRATCH_RE = re.compile(r"^[0-9a-f]{8}$")
 ENDED = ("gone", "left")
+# A parked agent has no process but is still on the roster: its name, role,
+# mail and conversation stay, and opening, prompting or mailing it resumes it.
+PARKED = "parked"
 # A wake marker older than this is assumed lost (the prompt never turned into a
 # turn), so the next send may wake again.
 WAKE_TTL = 120
@@ -164,6 +167,7 @@ LOOK = {
     "unknown": ("?", "35"),
     "gone": ("✗", "2"),
     "left": ("–", "2"),
+    "parked": ("◌", "2"),
 }
 
 FRAME = (
@@ -756,7 +760,7 @@ def reconcile():
     A backend that cannot be asked leaves its entries as they are, so a herdr or
     tmux hiccup never marks agents gone.
     """
-    entries = [e for e in all_entries() if e.get("status") not in ENDED]
+    entries = [e for e in all_entries() if e.get("status") not in ENDED + (PARKED,)]
     matched = {}
 
     herdrs = [e for e in entries if backend(e) == "herdr"]
@@ -1093,8 +1097,8 @@ def render_list(rows, color=False, width=None):
             lines.extend(textwrap.wrap(role, max(width - len(indent), 20),
                                        initial_indent=indent, subsequent_indent=indent))
         if backend(e) == "tmux":
-            place = ["tmux %s" % e.get("pane_id")]
-            if not ended:
+            place = ["tmux %s" % e.get("pane_id")] if status != PARKED else ["parked: opening, prompting or mailing it resumes it"]
+            if not ended and status != PARKED:
                 place.append("attached" if e.get("attached") else "detached")
         else:
             place = [labels.get(e.get("workspace_id")) or e.get("workspace_id") or "-",
@@ -1202,7 +1206,7 @@ def cmd_send(args):
     for target in targets:
         to = target["name"]
         deliver(sender["name"], to, body, args.reply_to, to_filter=flt, msg_id=msg_id)
-        print("sent %s to %s: %s" % (msg_id, to, wake(sender, target, matched.get(to))))
+        print("sent %s to %s: %s" % (msg_id, to, wake(sender, target, matched.get(to), unpark_ok=not flt)))
     for m, names in sorted(remote.items()):
         payload = {"from": sender["name"], "to": names, "body": body, "in_reply_to": args.reply_to,
                    "to_filter": flt, "id": msg_id}
@@ -1210,9 +1214,19 @@ def cmd_send(args):
             print(line)
 
 
-def wake(sender, target, a):
-    """Wake an idle recipient the user is not typing into; say how the message will reach it."""
+def wake(sender, target, a, unpark_ok=True):
+    """Wake an idle recipient the user is not typing into; say how the message will reach it.
+
+    Mail addressed to a parked agent resumes it; mail to a wildcard leaves
+    parked agents parked, so one broadcast does not start them all.
+    """
     to, status = target["name"], target.get("status")
+    if status == PARKED and not unpark_ok:
+        return "%s is parked; the message waits in its inbox" % to
+    if status == PARKED and backend(target) == "tmux":
+        unpark(target)
+        spawn_waiter(to)
+        return "%s was parked; resumed, it gets it once it is up" % to
     if status in ENDED or a is None:
         return "%s is %s; the message waits in its inbox" % (to, status)
     if status in ("idle", "done"):
@@ -1362,6 +1376,9 @@ def cmd_attach(args):
         print(attach_remote(where[1], where[2]))
         return
     e, a = where[1], matched.get(name)
+    if e.get("status") == PARKED:
+        pane = unpark(e)
+        e, a = load(name), {"pane_id": pane, "roster": name, "attached": 0}
     if here:
         if a is None or backend(e) != "tmux":
             raise Fail("%s is not a live tmux agent; `roster resume %s` brings a gone one back" % (name, name))
@@ -1638,12 +1655,81 @@ def cmd_resume(args):
     e = load(name)
     if not e:
         raise Fail("no agent named %s on the roster" % name)
-    if e.get("status") != "gone":
-        raise Fail("%s is %s; only a gone agent can be resumed" % (name, e.get("status")))
+    if e.get("status") not in ("gone", PARKED):
+        raise Fail("%s is %s; only a gone or parked agent can be resumed" % (name, e.get("status")))
     pane = resume_in_tmux(e, args.model, args.effort)
     print("resumed %s in %s" % (name, short_path(e["cwd"])))
     if not args.no_attach:
         print(attach(e, {"pane_id": pane, "roster": name, "attached": 0}))
+
+
+def unpark(e, wait=False):
+    """Resume a parked agent; with wait, until its first hook says it is idle."""
+    pane = resume_in_tmux(e)
+    if wait:
+        for _ in range(60):
+            cur = load(e["name"]) or {}
+            if cur.get("status") in ("idle", "done"):
+                break
+            time.sleep(0.5)
+    return pane
+
+
+def park(name):
+    """Stop an idle agent's process and keep everything else; return why not, or None."""
+    matched = reconcile()
+    e, a = load(name), matched.get(name)
+    if not e or backend(e) != "tmux" or a is None:
+        return "not a live tmux agent here"
+    if e.get("status") not in ("idle", "done"):
+        return "it is %s" % e.get("status")
+    if unread(name):
+        return "it has unread mail"
+    if user_is_on(e, a) or not prompt_is_empty(e):
+        return "it is in use (its window is focused, or its input holds text)"
+    # Parked first, so its SessionEnd hook leaves it parked instead of gone.
+    e.update(status=PARKED, status_at=now(), ended_at=None, end_reason=None)
+    save(e)
+    try:
+        tmux("kill-session", "-t", e["pane_id"])
+    except Fail:
+        pass
+    return None
+
+
+def cmd_park(args):
+    """Park agents by name, or (--idle-for) every unpinned one idle that long."""
+    if args.idle_for is not None:
+        cutoff = time.time() - args.idle_for * 3600
+        names = []
+        for e in all_entries():
+            if backend(e) != "tmux" or e.get("pinned") or e.get("temp") or e.get("status") not in ("idle", "done"):
+                continue
+            try:
+                since = datetime.strptime(e.get("status_at"), "%Y-%m-%dT%H:%M:%S%z").timestamp()
+            except (TypeError, ValueError):
+                continue
+            if since < cutoff:
+                names.append(e["name"])
+    else:
+        names = [check_name(n) for n in args.names]
+    if not names and args.idle_for is None:
+        raise Fail("park needs agent names, or --idle-for HOURS")
+    for name in names:
+        why = park(name)
+        print("parked %s" % name if why is None else "kept %s: %s" % (name, why))
+
+
+def cmd_pin(args):
+    e = load(check_name(args.name))
+    if not e:
+        raise Fail("no agent named %s here" % args.name)
+    if args.off:
+        e.pop("pinned", None)
+    else:
+        e["pinned"] = True
+    save(e)
+    print("%s is %s" % (args.name, "no longer pinned" if args.off else "pinned: never parked automatically"))
 
 
 def cmd_cleanup(args):
@@ -2491,6 +2577,9 @@ def paste(e, text):
 
 
 def live_tmux(name):
+    e = load(name)
+    if e and e.get("status") == PARKED:
+        unpark(e, wait=True)
     matched = reconcile()
     e, a = load(name), matched.get(name)
     if not e or backend(e) != "tmux" or a is None:
@@ -2643,7 +2732,8 @@ def cmd_rpc(args):
                     continue
                 deliver(p["from"], to, p["body"], p.get("in_reply_to"), to_filter=p.get("to_filter"),
                         msg_id=p.get("id"), from_machine=caller)
-                results.append({"to": to, "result": wake(sender, target, matched.get(to))})
+                results.append({"to": to, "result": wake(sender, target, matched.get(to),
+                                                         unpark_ok=not p.get("to_filter"))})
             out = {"results": results}
         elif verb == "attach":
             return rpc_attach(check_name(rest[0]), steal="--steal" in rest)
@@ -2655,7 +2745,7 @@ def cmd_rpc(args):
         elif verb == "resume":
             reconcile()
             e = load(check_name(rest[0]))
-            if not e or e.get("status") != "gone":
+            if not e or e.get("status") not in ("gone", PARKED):
                 raise Fail("%s is %s here" % (rest[0], e.get("status") if e else "unknown"))
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"))
@@ -2939,6 +3029,26 @@ Description=tmux server holding the roster's agent sessions
 ExecStart=%(tmux)s -L roster -f %(conf)s -D
 """
 
+PARK_SERVICE = """[Unit]
+Description=Park roster agents idle for a while
+
+[Service]
+# Written by `roster install`; park_after_hours in config.toml, 0 turns it off.
+Type=oneshot
+ExecStart=%(bin)s/roster park --idle-for %(hours)s
+"""
+
+PARK_TIMER = """[Unit]
+Description=Park roster agents idle for a while, hourly
+
+[Timer]
+OnCalendar=hourly
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
 TRAY_SERVICE = """[Unit]
 Description=Agent roster tray menu
 PartOf=graphical-session.target
@@ -3021,6 +3131,11 @@ def cmd_install(args):
     done = [put(conf_path, conf, args.check),
             put(os.path.join(units, TMUX_UNIT),
                 TMUX_SERVICE % {"tmux": tool("tmux"), "conf": conf_path}, args.check)]
+    hours = config().get("park_after_hours", 8)
+    if hours:
+        done.append(put(os.path.join(units, "roster-park.service"),
+                        PARK_SERVICE % {"bin": HOME_BIN, "hours": hours}, args.check))
+        done.append(put(os.path.join(units, "roster-park.timer"), PARK_TIMER, args.check))
     if not args.no_hooks:
         done.append(merge_hooks(args.check))
     if not args.no_skill:
@@ -3041,6 +3156,10 @@ def cmd_install(args):
     if args.check:
         return
     run(["systemctl", "--user", "daemon-reload"])
+    if hours:
+        run(["systemctl", "--user", "enable", "--now", "roster-park.timer"])
+    else:
+        run(["systemctl", "--user", "disable", "--now", "roster-park.timer"])
     if args.tray:
         run(["systemctl", "--user", "enable", "roster-tray.service"])
         run(["systemctl", "--user", "restart", "roster-tray.service"])
@@ -3270,7 +3389,7 @@ def cmd_hook(args):
         e = load(name)
         if e and e.get("session_id") == session_id and e.get("temp"):
             forget(e)
-        elif e and e.get("session_id") == session_id and e.get("status") not in ENDED:
+        elif e and e.get("session_id") == session_id and e.get("status") not in ENDED + (PARKED,):
             e.update(status="gone", ended_at=now(), end_reason=data.get("reason") or "other")
             save(e)
         return
@@ -3364,6 +3483,16 @@ def main():
     s.add_argument("--to", metavar="MACHINE", help="move these agents, conversation and all, to a peer machine")
     s.add_argument("--idle", action="store_true", help="every idle, unfocused Claude agent in herdr")
     s.set_defaults(fn=cmd_move)
+
+    s = sub.add_parser("park", help="stop idle agents' processes; opening, prompting or mailing one resumes it")
+    s.add_argument("names", nargs="*")
+    s.add_argument("--idle-for", type=float, metavar="HOURS", help="every unpinned agent idle at least this long")
+    s.set_defaults(fn=cmd_park)
+
+    s = sub.add_parser("pin", help="keep an agent running: auto-park skips it")
+    s.add_argument("name")
+    s.add_argument("--off", action="store_true", help="unpin")
+    s.set_defaults(fn=cmd_pin)
 
     s = sub.add_parser("cleanup", help="end and forget detached agents that never got a real name")
     s.add_argument("-n", "--dry-run", action="store_true", help="only say what would go")
