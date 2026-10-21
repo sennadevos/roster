@@ -179,6 +179,15 @@ class Conversation extends ChangeNotifier {
   /// Sends the keys for a dialog option. Ticking a box or moving between a
   /// form's questions keeps the card and refreshes it; picking an answer
   /// marks the dialog answered until the screen shows what comes next.
+  /// Answers the dialog's free-text option with [text].
+  Future<void> answerText(DialogOption option, String text) async {
+    await client.answer(agent, option.key, text);
+    answered = true;
+    _changed();
+    await Future<void>.delayed(const Duration(milliseconds: 700));
+    if (!_disposed) await fetchScreen();
+  }
+
   Future<void> answer(DialogOption option) async {
     final staysOpen = option.checked != null || option.actionKeys != null;
     await client.keys(agent, option.keys);

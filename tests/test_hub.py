@@ -261,6 +261,14 @@ class HubTest(unittest.TestCase):
         for bad in (["C-c"], ["x"], ["Enter", "-t"], [], "Enter", [1], ["Up"] * 33):
             self.assertEqual(self.request("POST", "/v1/keys", {"agent": "infra@hub1", "keys": bad}, token=self.token)[0], 400, bad)
 
+    def test_answer(self):
+        status, _ = self.request("POST", "/v1/answer", {"agent": "infra@hub1", "key": "3", "text": "Green, actually"},
+                                 token=self.token)
+        self.assertEqual(status, 200)
+        self.assertIn({"argv": ["answer", "infra@hub1", "3", "-"], "stdin": "Green, actually"}, self.calls())
+        for bad in ({"key": "x", "text": "a"}, {"key": "3", "text": ""}, {"key": "3", "text": "two\nlines"}, {"key": "3"}):
+            self.assertEqual(self.request("POST", "/v1/answer", dict(bad, agent="infra@hub1"), token=self.token)[0], 400, bad)
+
     def test_new_resume_kill(self):
         status, got = self.request("POST", "/v1/new", {"machine": "hub1", "cwd": "-x", "name": "docs", "role": "writes docs",
                                                         "prompt": "go"}, token=self.token)

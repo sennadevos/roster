@@ -87,6 +87,17 @@ void main() {
     expect(d.actions.map((a) => a.keys), [['Left'], ['Right']]);
   });
 
+  test('the own-answer option', () {
+    final d = Screen.fromJson(jsonDecode('''
+      {"agent": "a@m", "status": "blocked", "text": "…",
+       "dialog": {"title": "What drives the air?", "cursor": "4",
+                  "options": [{"key": "1", "label": "EDF", "detail": ""},
+                              {"key": "4", "label": "4", "detail": "", "input": true, "text": "4"},
+                              {"key": "5", "label": "Chat about this", "detail": ""}]}}''') as Map<String, dynamic>).dialog!;
+    expect(d.options.map((o) => o.input), [false, true, false]);
+    expect(d.options[1].text, '4');
+  });
+
   test('devices and push payloads', () {
     final d = Device.fromJson({'id': 'd1', 'name': 'Pixel', 'created': 'x', 'last_seen': 'y', 'push': true, 'current': true});
     expect((d.id, d.push, d.current, d.lastSeen), ('d1', true, true, 'y'));

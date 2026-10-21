@@ -733,6 +733,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ("GET", "/v1/screen"): ("screen", True),
         ("POST", "/v1/prompt"): ("prompt", True),
         ("POST", "/v1/keys"): ("keys", True),
+        ("POST", "/v1/answer"): ("answer", True),
         ("POST", "/v1/new"): ("new", True),
         ("POST", "/v1/resume"): ("resume", True),
         ("POST", "/v1/kill"): ("kill", True),
@@ -951,6 +952,17 @@ class Handler(http.server.BaseHTTPRequestHandler):
         agent = check_agent(self.body.get("agent"))
         text = check_text(self.body.get("text"), "text", 64 * 1024, required=True)
         cli("prompt", agent, "-", stdin=text, timeout=20)
+        self.hub.wake.set()
+        return {"ok": True}
+
+    def r_answer(self):
+        """Type an own answer into the dialog's free-text option and submit it."""
+        agent = check_agent(self.body.get("agent"))
+        key = self.body.get("key")
+        if not isinstance(key, str) or not re.fullmatch(r"\d{1,2}", key):
+            raise HttpError(400, "key must be the number of the free-text option")
+        text = check_text(self.body.get("text"), "text", 4000, oneline=True, required=True)
+        cli("answer", agent, key, "-", stdin=text, timeout=20)
         self.hub.wake.set()
         return {"ok": True}
 

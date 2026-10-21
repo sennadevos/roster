@@ -41,6 +41,8 @@ class ScreenDialog {
                 label: '${o['label'] ?? ''}',
                 detail: '${o['detail'] ?? ''}',
                 checked: o['checked'] is bool ? o['checked'] as bool : null,
+                input: o['input'] == true,
+                text: '${o['text'] ?? ''}',
               ),
         ],
         tabs: [
@@ -60,7 +62,21 @@ class ScreenDialog {
 }
 
 class DialogOption {
-  const DialogOption({required this.key, required this.label, this.detail = '', this.checked, this.actionKeys});
+  const DialogOption({
+    required this.key,
+    required this.label,
+    this.detail = '',
+    this.checked,
+    this.actionKeys,
+    this.input = false,
+    this.text = '',
+  });
+
+  /// Claude's own-answer field ("Type something"): answered with text, not a key.
+  final bool input;
+
+  /// What is typed in that field now.
+  final String text;
 
   /// The key that picks this option.
   final String key;

@@ -70,6 +70,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 | `GET /v1/transcript` | `?agent=&after=&before=&limit=` | as `roster transcript --json` |
 | `GET /v1/screen` | `?agent=` | as `roster screen --json` |
 | `POST /v1/prompt` | `{"agent", "text"}` | `{"ok": true}` |
+| `POST /v1/answer` | `{"agent", "key", "text"}`: type your own answer into the dialog's free-text option (`input: true`) and submit it | `{"ok": true}` |
 | `POST /v1/keys` | `{"agent", "keys": [...]}` | `{"ok": true}` |
 | `POST /v1/new` | `{"machine", "cwd", "name", "role", "prompt", "model", "effort"}` (all but `machine` optional; `effort` is `low`, `medium`, `high`, `xhigh` or `max`; `model` an alias such as `opus` or a full model name) | `{"agent"}` |
 | `POST /v1/resume` | `{"agent"}` | `{"ok": true}` |

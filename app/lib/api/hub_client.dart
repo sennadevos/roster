@@ -127,6 +127,10 @@ class HubClient {
   Future<void> keys(String agent, List<String> keys) =>
       _send('POST', '/v1/keys', body: {'agent': agent, 'keys': keys});
 
+  /// Types an own answer into the dialog's free-text option and submits it.
+  Future<void> answer(String agent, String key, String text) =>
+      _send('POST', '/v1/answer', body: {'agent': agent, 'key': key, 'text': text});
+
   /// Starts an agent; answers its `name@machine`.
   Future<String> newAgent({
     required String machine,

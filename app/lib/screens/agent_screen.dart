@@ -292,6 +292,7 @@ class _AgentScreenState extends State<AgentScreen> {
                             answered: c.answered,
                             focusNode: _dialogFocus,
                             onPick: c.answer,
+                            onAnswerText: c.answerText,
                             onRefresh: c.fetchScreen,
                           ))
                         : const SizedBox(width: double.infinity),
@@ -762,6 +763,7 @@ class DialogCard extends StatefulWidget {
     required this.screen,
     required this.onPick,
     required this.onRefresh,
+    this.onAnswerText,
     this.answered = false,
     this.focusNode,
   });
@@ -770,6 +772,7 @@ class DialogCard extends StatefulWidget {
   final bool answered;
   final FocusNode? focusNode;
   final Future<void> Function(DialogOption) onPick;
+  final Future<void> Function(DialogOption, String)? onAnswerText;
   final Future<void> Function() onRefresh;
 
   @override
@@ -782,6 +785,32 @@ class _DialogCardState extends State<DialogCard> {
 
   /// Tick boxes flipped here and not yet shown back by the screen.
   final Map<String, bool> _ticked = {};
+
+  /// The own-answer field.
+  final TextEditingController _own = TextEditingController();
+  final FocusNode _ownFocus = FocusNode();
+  String? _ownFor;
+
+  @override
+  void dispose() {
+    _own.dispose();
+    _ownFocus.dispose();
+    super.dispose();
+  }
+
+  Future<void> _sendOwn(DialogOption o) async {
+    final text = _own.text.trim();
+    if (text.isEmpty || _busy != null || widget.onAnswerText == null) return;
+    setState(() => _busy = o);
+    try {
+      await widget.onAnswerText!(o, text);
+      _own.clear();
+    } catch (e) {
+      if (mounted) showError(context, e);
+    } finally {
+      if (mounted) setState(() => _busy = null);
+    }
+  }
 
   @override
   void didUpdateWidget(DialogCard old) {
@@ -814,7 +843,11 @@ class _DialogCardState extends State<DialogCard> {
     final ch = e.character;
     for (final o in dialog.options) {
       if (ch != null && ch == o.key) {
-        _pick(o);
+        if (o.input) {
+          _ownFocus.requestFocus();
+        } else {
+          _pick(o);
+        }
         return KeyEventResult.handled;
       }
     }
@@ -883,13 +916,16 @@ class _DialogCardState extends State<DialogCard> {
             ),
           const SizedBox(height: 8),
           for (final o in dialog.options)
-            _OptionRow(
-              option: o,
-              checked: o.checked == null ? null : (_ticked[o.key] ?? o.checked!),
-              busy: identical(_busy, o),
-              enabled: _busy == null,
-              onTap: () => _pick(o),
-            ),
+            if (o.input && widget.onAnswerText != null)
+              _ownAnswer(context, o)
+            else
+              _OptionRow(
+                option: o,
+                checked: o.checked == null ? null : (_ticked[o.key] ?? o.checked!),
+                busy: identical(_busy, o),
+                enabled: _busy == null,
+                onTap: () => _pick(o),
+              ),
           if (dialog.actions.isNotEmpty) ...[
             const SizedBox(height: 10),
             Row(children: [
@@ -961,6 +997,50 @@ class _DialogCardState extends State<DialogCard> {
           ),
         ),
       ),
+    );
+  }
+}
+
+extension on _DialogCardState {
+  /// Claude's "Type something" option as a text field with a send button.
+  Widget _ownAnswer(BuildContext context, DialogOption o) {
+    final theme = Theme.of(context);
+    if (_ownFor != '${o.key}/${o.text}') {
+      _ownFor = '${o.key}/${o.text}';
+      _own.text = o.text;
+    }
+    return Padding(
+      padding: const EdgeInsets.only(top: 6),
+      child: Row(crossAxisAlignment: CrossAxisAlignment.center, children: [
+        Container(
+          width: 22,
+          alignment: Alignment.center,
+          child: Text(o.key, style: theme.textTheme.labelMedium),
+        ),
+        const SizedBox(width: 8),
+        Expanded(
+          child: TextField(
+            controller: _own,
+            focusNode: _ownFocus,
+            enabled: _busy == null,
+            textInputAction: TextInputAction.send,
+            onSubmitted: (_) => _sendOwn(o),
+            decoration: InputDecoration(
+              isDense: true,
+              hintText: 'Type your own answer',
+              border: OutlineInputBorder(borderRadius: BorderRadius.circular(10)),
+            ),
+          ),
+        ),
+        const SizedBox(width: 6),
+        identical(_busy, o)
+            ? const Padding(padding: EdgeInsets.all(12), child: RunningSpinner(size: 16))
+            : IconButton.filledTonal(
+                tooltip: 'Send this answer',
+                onPressed: _busy == null ? () => _sendOwn(o) : null,
+                icon: const Icon(Icons.send_rounded, size: 18),
+              ),
+      ]),
     );
   }
 }

@@ -56,7 +56,7 @@ def main():
     elif cmd == "prompt":
         if argv[1].startswith("busy@"):
             fail("%s has a dialog open; answer it with keys" % argv[1])
-    elif cmd == "keys":
+    elif cmd in ("keys", "answer"):
         pass
     elif cmd == "new":
         name = next((a.split("=", 1)[1] for a in argv if a.startswith("--name=")), "ab12cd34")
