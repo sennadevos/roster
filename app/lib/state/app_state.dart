@@ -83,6 +83,28 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   /// The agent list by machine, or everything by last activity.
   bool recentView = false;
 
+  /// On web: the hub now serves a newer build of this app than the one running.
+  bool updateReady = false;
+  String? _webBuild;
+
+  /// Asks the hub which web build it serves; a change means this page is old.
+  Future<void> checkForUpdate() async {
+    final c = client;
+    if (!kIsWeb || c == null || updateReady) return;
+    try {
+      final web = (await c.version())['web'];
+      if (web is! String) return;
+      if (_webBuild == null) {
+        _webBuild = web;
+      } else if (web != _webBuild) {
+        updateReady = true;
+        notifyListeners();
+      }
+    } catch (_) {
+      // The hub being away is shown elsewhere.
+    }
+  }
+
   /// Why the app went back to the pair screen, when it was not the user.
   String? unpairedReason;
 

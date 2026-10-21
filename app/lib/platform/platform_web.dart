@@ -19,6 +19,14 @@ http.Client streamingClient() => FetchClient(mode: RequestMode.cors, cache: Requ
 
 Uri? pageHubUrl() => hubUrlForPage(Uri.base);
 
+/// A link from a message, in a new tab.
+Future<void> openLink(Uri url) async {
+  web.window.open(url.toString(), '_blank', 'noopener,noreferrer');
+}
+
+/// Load the page again, for a new version of the app.
+void reloadPage() => web.window.location.reload();
+
 class _LocalStorage implements StringStorage {
   @override
   String? getItem(String key) => web.window.localStorage.getItem(key);

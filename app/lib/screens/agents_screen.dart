@@ -1,9 +1,12 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 
 import '../app.dart';
 import '../models/agent.dart';
+import '../platform/platform.dart';
 import '../state/app_state.dart';
 import '../theme.dart';
 import '../widgets/bits.dart';
@@ -40,10 +43,18 @@ class _AgentsScreenState extends State<AgentsScreen> {
   void initState() {
     super.initState();
     _search.addListener(() => setState(() {}));
+    if (kIsWeb) {
+      // Note the build now, then look for a newer one every two minutes.
+      WidgetsBinding.instance.addPostFrameCallback((_) => AppScope.read(context).checkForUpdate());
+      _updates = Timer.periodic(const Duration(minutes: 2), (_) => AppScope.read(context).checkForUpdate());
+    }
   }
+
+  Timer? _updates;
 
   @override
   void dispose() {
+    _updates?.cancel();
     _search.dispose();
     _searchFocus.dispose();
     _keys.dispose();
@@ -450,6 +461,12 @@ class _AgentList extends StatelessWidget {
             ),
       body: Column(
         children: [
+          if (app.updateReady)
+            MaterialBanner(
+              leading: const Icon(Icons.system_update_alt),
+              content: const Text('Roster was updated.'),
+              actions: [TextButton(onPressed: reloadPage, child: const Text('Reload'))],
+            ),
           if (app.haveSnapshot && app.link != Link.live)
             Delayed(
               delay: const Duration(seconds: 3),

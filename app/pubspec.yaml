@@ -21,6 +21,7 @@ dependencies:
   markdown: 7.3.1
   unifiedpush: 6.2.0
   web: 1.1.1
+  url_launcher: 6.3.3
 
 dev_dependencies:
   flutter_test:

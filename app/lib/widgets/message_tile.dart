@@ -6,6 +6,7 @@ import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 
 import '../models/transcript.dart';
+import '../platform/platform.dart';
 import '../theme.dart';
 import 'status.dart';
 
@@ -90,6 +91,10 @@ class AssistantBlock extends StatelessWidget {
             data: text,
             styleSheet: markdownStyle(context),
             builders: {'pre': CodeBlockBuilder()},
+            onTapLink: (text, href, title) {
+              final url = Uri.tryParse(href ?? '');
+              if (url != null && const {'http', 'https', 'mailto'}.contains(url.scheme)) openLink(url);
+            },
           ),
         ),
       ),

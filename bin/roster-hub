@@ -913,7 +913,12 @@ class Handler(http.server.BaseHTTPRequestHandler):
     # endpoints
 
     def r_version(self):
-        return {"hub": VERSION, "api": API}
+        # The web build being served, so an open page can tell it was updated.
+        try:
+            web = str(int(os.path.getmtime(os.path.join(os.path.expanduser(self.hub.cfg["web_dir"]), "main.dart.js"))))
+        except OSError:
+            web = None
+        return {"hub": VERSION, "api": API, "web": web}
 
     def r_pair(self):
         addr = self.client()
