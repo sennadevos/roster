@@ -1679,6 +1679,11 @@ def park(name):
     """Stop an idle agent's process and keep everything else; return why not, or None."""
     matched = reconcile()
     e, a = load(name), matched.get(name)
+    if e and backend(e) == "tmux" and e.get("status") == "gone" and e.get("session_id"):
+        # Ended by a crash or a reboot: nothing to stop, it just waits parked.
+        e.update(status=PARKED, status_at=now(), ended_at=None, end_reason=None)
+        save(e)
+        return None
     if not e or backend(e) != "tmux" or a is None:
         return "not a live tmux agent here"
     if e.get("status") not in ("idle", "done"):
