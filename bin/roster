@@ -2250,10 +2250,14 @@ def peer(mach):
 def ssh_argv(rec, *args, tty=False):
     """ssh to a peer as roster: its own key, no prompts, one shared connection."""
     os.makedirs(CACHE, exist_ok=True)
+    # One shared connection per peer, except where the far sshd cannot take
+    # it: Windows' OpenSSH keeps the first request's SSH_ORIGINAL_COMMAND for
+    # every later one on the same connection (peer record "mux": false).
+    mux = (["-o", "ControlMaster=auto", "-o", "ControlPath=%s/ssh-%%C" % CACHE, "-o", "ControlPersist=10m"]
+           if rec.get("mux", True) else ["-o", "ControlMaster=no", "-o", "ControlPath=none"])
     return [tool("ssh"), "-i", KEY, "-o", "IdentitiesOnly=yes", "-o", "BatchMode=yes",
             "-o", "ConnectTimeout=4", "-o", "ServerAliveInterval=15", "-o", "ServerAliveCountMax=2",
-            "-o", "ControlMaster=auto", "-o", "ControlPath=%s/ssh-%%C" % CACHE, "-o", "ControlPersist=10m",
-            "-t" if tty else "-T", rec["ssh"], shlex.join([str(PROTOCOL)] + [str(a) for a in args])]
+            *mux, "-t" if tty else "-T", rec["ssh"], shlex.join([str(PROTOCOL)] + [str(a) for a in args])]
 
 
 def rpc(mach, *args, data=None, timeout=20):
@@ -2905,11 +2909,13 @@ def authorize(pubkey, from_machine):
     os.chmod(path, 0o600)
 
 
-def record_peer(mach, ssh_target):
+def record_peer(mach, ssh_target, mux=True):
     if mach == machine():
         raise Fail("a peer cannot have this machine's own name (%s)" % mach)
-    write_atomic(os.path.join(PEERS, mach + ".json"),
-                 json.dumps({"machine": mach, "ssh": ssh_target, "added_at": now()}, indent=2) + "\n")
+    rec = {"machine": mach, "ssh": ssh_target, "added_at": now()}
+    if not mux:
+        rec["mux"] = False
+    write_atomic(os.path.join(PEERS, mach + ".json"), json.dumps(rec, indent=2) + "\n")
 
 
 def push_install(target, extra=()):
