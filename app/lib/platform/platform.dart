@@ -10,6 +10,7 @@
 /// - `Uri? pageHubUrl()`: on web, the hub the page was served from.
 /// - `openLink(Uri)`: a link from a message, in a new tab or the right app.
 /// - `reloadPage()`: on web, load the new version of the app.
+/// - `copyText(String)`: the clipboard, also on a plain-HTTP page.
 library;
 
 export 'platform_io.dart' if (dart.library.js_interop) 'platform_web.dart';

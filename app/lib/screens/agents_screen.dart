@@ -43,6 +43,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
   void initState() {
     super.initState();
     _search.addListener(() => setState(() {}));
+    installCopyKey();
     if (kIsWeb) {
       // Note the build now, then look for a newer one every two minutes.
       WidgetsBinding.instance.addPostFrameCallback((_) => AppScope.read(context).checkForUpdate());

@@ -1,7 +1,6 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 
@@ -257,7 +256,7 @@ class _CopyButtonState extends State<CopyButton> {
   bool _done = false;
 
   Future<void> _copy() async {
-    await Clipboard.setData(ClipboardData(text: widget.text));
+    await copyText(widget.text);
     if (!mounted) return;
     setState(() => _done = true);
     await Future<void>.delayed(const Duration(milliseconds: 1400));

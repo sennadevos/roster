@@ -24,6 +24,23 @@ Future<void> openLink(Uri url) async {
   web.window.open(url.toString(), '_blank', 'noopener,noreferrer');
 }
 
+/// Put text on the clipboard. The page is plain HTTP, not a secure context,
+/// so the browser offers no clipboard API (and Flutter's copy throws); the
+/// old way still works during a key press or click: a hidden text field,
+/// selected, and execCommand('copy').
+Future<bool> copyText(String text) async {
+  final area = web.document.createElement('textarea') as web.HTMLTextAreaElement
+    ..value = text
+    ..setAttribute('readonly', '')
+    ..style.position = 'fixed'
+    ..style.opacity = '0';
+  web.document.body!.append(area);
+  area.select();
+  final ok = web.document.execCommand('copy');
+  area.remove();
+  return ok;
+}
+
 /// Load the page again, for a new version of the app.
 void reloadPage() => web.window.location.reload();
 

@@ -1,3 +1,4 @@
+import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
 
@@ -18,6 +19,12 @@ Uri? pageHubUrl() => null;
 /// A link from a message, in the browser or the app that handles it.
 Future<void> openLink(Uri url) async {
   await launchUrl(url, mode: LaunchMode.externalApplication);
+}
+
+/// Put text on the clipboard.
+Future<bool> copyText(String text) async {
+  await Clipboard.setData(ClipboardData(text: text));
+  return true;
 }
 
 /// The Android app updates through its APK, not by reloading.

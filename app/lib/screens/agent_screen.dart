@@ -6,6 +6,7 @@ import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
 
 import '../app.dart';
+import '../platform/platform.dart';
 import '../models/agent.dart';
 import '../models/misc.dart';
 import '../models/transcript.dart';
@@ -15,6 +16,37 @@ import '../theme.dart';
 import '../widgets/bits.dart';
 import '../widgets/message_tile.dart';
 import '../widgets/status.dart';
+
+/// What is selected in the conversation now, for Ctrl+C.
+final conversationSelection = ValueNotifier<String?>(null);
+
+/// Ctrl+C (Cmd+C) with text selected in the conversation: copy it. Caught at
+/// the keyboard, before focus: Flutter's own selection copy runs first
+/// otherwise, and throws on a plain-HTTP page. A focused text field (the
+/// composer) keeps its own Ctrl+C.
+bool _copyKey(KeyEvent e) {
+  if (e is! KeyDownEvent || e.logicalKey != LogicalKeyboardKey.keyC) return false;
+  if (!(HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed)) return false;
+  final text = conversationSelection.value;
+  if (text == null || text.isEmpty) return false;
+  if (FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>() != null) {
+    return false;
+  }
+  copyText(text);
+  final ctx = FocusManager.instance.primaryFocus?.context ?? navigatorKey.currentContext;
+  if (ctx != null) {
+    ScaffoldMessenger.maybeOf(ctx)
+        ?.showSnackBar(const SnackBar(content: Text('Copied'), duration: Duration(milliseconds: 1200)));
+  }
+  return true;
+}
+
+/// Registers the Ctrl+C handler once.
+void installCopyKey() {
+  HardwareKeyboard.instance
+    ..removeHandler(_copyKey)
+    ..addHandler(_copyKey);
+}
 
 /// One agent: its conversation, its dialog when blocked, and a composer.
 class AgentScreen extends StatefulWidget {
@@ -186,7 +218,7 @@ class _AgentScreenState extends State<AgentScreen> {
           await _conv.fetchNew();
           await _conv.fetchScreen();
         case 'copy':
-          await Clipboard.setData(ClipboardData(text: widget.agent));
+          await copyText(widget.agent);
           if (mounted) showError(context, 'Copied ${widget.agent}');
         case 'resume':
           await client.resume(widget.agent);
@@ -341,6 +373,7 @@ class _AgentScreenState extends State<AgentScreen> {
     final working = status == 'working';
     final theme = Theme.of(context);
     return SelectionArea(
+      onSelectionChanged: (content) => conversationSelection.value = content?.plainText,
       child: CustomScrollView(
         controller: _scroll,
         center: _centerKey,
