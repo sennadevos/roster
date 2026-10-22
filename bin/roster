@@ -3103,6 +3103,20 @@ WantedBy=default.target
 """
 
 
+BRAIN_SERVICE = """[Unit]
+Description=roster-brain: chats and agents behind one router
+
+[Service]
+# Written by `roster install --brain`. Configured in ~/.config/roster/brain.toml.
+ExecStart=%h/.local/bin/roster-brain serve
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+"""
+
+
 def put(path, text, check):
     """Write a file when its content differs; say what happened."""
     try:
@@ -3182,6 +3196,8 @@ def cmd_install(args):
                         TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
     if args.hub:
         done.append(put(os.path.join(units, "roster-hub.service"), HUB_SERVICE, args.check))
+    if args.brain:
+        done.append(put(os.path.join(units, "roster-brain.service"), BRAIN_SERVICE, args.check))
     print("\n".join(done))
     if args.check:
         return
@@ -3196,6 +3212,13 @@ def cmd_install(args):
     if args.hub:
         run(["systemctl", "--user", "enable", "roster-hub.service"])
         run(["systemctl", "--user", "restart", "roster-hub.service"])
+    if args.brain:
+        got = run([os.path.join(HOME_BIN, "roster-brain"), "setup"], timeout=600)
+        print((got.stdout + got.stderr).strip())
+        if got.returncode:
+            raise Fail("roster-brain setup failed")
+        run(["systemctl", "--user", "enable", "roster-brain.service"])
+        run(["systemctl", "--user", "restart", "roster-brain.service"])
     if tmux_running():
         # The live server too, so open windows get the new titles right away.
         try:
@@ -3586,6 +3609,8 @@ def main():
     s.add_argument("--no-skill", action="store_true", help="leave ~/.claude/skills/roster alone")
     s.add_argument("--tray", action="store_true", help="also install and enable the tray")
     s.add_argument("--hub", action="store_true", help="also install and enable roster-hub, the API for phones")
+    s.add_argument("--brain", action="store_true",
+                   help="also install and enable roster-brain, the chat and agent router (docs/brain.md)")
     s.set_defaults(fn=cmd_install)
 
     s = sub.add_parser("version", help="print roster's version")

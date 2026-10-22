@@ -1,0 +1,53 @@
+#!/usr/bin/env python3
+"""roster-brain launcher: keeps the brain's venv in step with
+brain/requirements.txt, then runs the brain in it. See docs/brain.md."""
+
+import hashlib
+import os
+import subprocess
+import sys
+
+CODE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+BRAIN = os.path.join(CODE, "brain")
+VENV = os.path.join(os.environ.get("XDG_DATA_HOME") or os.path.expanduser("~/.local/share"),
+                    "roster", "brain-venv")
+STAMP = os.path.join(VENV, "roster-requirements.sha256")
+
+
+def wanted():
+    with open(os.path.join(BRAIN, "requirements.txt"), "rb") as f:
+        return hashlib.sha256(f.read()).hexdigest()
+
+
+def setup(quiet=False):
+    """Make or update the venv when requirements.txt changed."""
+    want = wanted()
+    try:
+        with open(STAMP) as f:
+            if f.read().strip() == want:
+                return
+    except OSError:
+        pass
+    say = (lambda m: None) if quiet else (lambda m: print(m, file=sys.stderr))
+    say("roster-brain: preparing %s" % VENV)
+    if not os.path.exists(os.path.join(VENV, "bin", "python")):
+        subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
+    subprocess.run([os.path.join(VENV, "bin", "python"), "-m", "pip", "install", "-q",
+                    "--disable-pip-version-check", "-r", os.path.join(BRAIN, "requirements.txt")], check=True)
+    with open(STAMP, "w") as f:
+        f.write(want + "\n")
+
+
+def main():
+    if sys.argv[1:2] == ["setup"]:
+        setup()
+        print("roster-brain: venv ready in %s" % VENV)
+        return
+    setup()
+    env = dict(os.environ, PYTHONPATH=BRAIN)
+    py = os.path.join(VENV, "bin", "python")
+    os.execve(py, [py, "-m", "roster_brain"] + sys.argv[1:], env)
+
+
+if __name__ == "__main__":
+    main()

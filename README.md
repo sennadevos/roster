@@ -59,6 +59,18 @@ roster-hub devices            # paired phones; roster-hub revoke <id> removes on
 
 Config is `~/.config/roster/hub.toml`: `listen` (a private `host:port`; the hub refuses public and wildcard addresses), `public_url` (what the app connects to), `push_token_file` (default `~/.config/secrets/ntfy-roster-hub-token`) and `push_allowed` (URL prefixes a phone's push endpoint must start with, default `https://ntfy.sennadevos.com/`). It speaks plain HTTP: put a TLS reverse proxy in front of it, which must set `X-Forwarded-For`. Paired devices are in `~/.local/state/roster/hub/devices.json`, which holds only hashes of their tokens.
 
+## Chats and agents: roster-brain
+
+`roster-brain` holds chats and Claude agent sessions behind one router. Decision models (a fast OpenRouter model, or Jev behind an HTTP endpoint) see each message first and answer a yes/no themselves, run a declared fast tool, or pick the model that answers: an OpenRouter model or Claude on the machine's own subscription login (Agent SDK, never an API key). Frontends such as a launcher bar talk to its HTTP API on `127.0.0.1:8791`. The design and API are in [docs/brain.md](docs/brain.md).
+
+```sh
+roster install --brain        # its venv, plus the roster-brain user unit
+roster-brain check            # what the config resolves to
+roster-brain ask "is 17 prime?"
+```
+
+Config is `~/.config/roster/brain.toml`; the OpenRouter key is read from `~/.config/secrets/openrouter-token`.
+
 ## State
 
 `~/.local/state/roster/`: `agents/<name>/agent.json` and `inbox/{tmp,new,cur}` per agent, `sessions/<claude session id>`, `peers/`, `outbox/`. Every write is a temp file renamed into place.
