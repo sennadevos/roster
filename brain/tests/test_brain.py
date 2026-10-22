@@ -60,6 +60,27 @@ class ParseTest(unittest.TestCase):
         self.assertIsNone(deciders.valid(d, {"decision": "route", "model": "openrouter:b"}, tools, models, True))
 
 
+class JevReadTest(unittest.TestCase):
+    def setUp(self):
+        self.jev = deciders.JevDecider({"name": "jev", "kind": "jev"}, None)
+
+    def test_tool_wins_on_its_own_question(self):
+        got = self.jev.read({"kind": {"choice": "task", "confidence": 0.5},
+                             "tool": {"choice": "date", "confidence": 0.83}})
+        self.assertEqual((got["decision"], got["tool"]), ("tool", "date"))
+
+    def test_yes_no(self):
+        a = {"kind": {"choice": "yes_no", "confidence": 1}, "hidden": {"noul": 0.1}, "tool": {"choice": "none"}}
+        self.assertEqual(self.jev.read(dict(a, yes={"noul": 0.97}))["text"], "Yes.")
+        self.assertEqual(self.jev.read(dict(a, yes={"noul": 0.02}))["text"], "No.")
+        self.assertIsNone(self.jev.read(dict(a, yes={"noul": 0.6})))
+        self.assertIsNone(self.jev.read(dict(a, yes={"noul": 0.99}, hidden={"noul": 0.8})))
+
+    def test_route(self):
+        got = self.jev.read({"kind": {"choice": "task"}, "model": {"choice": "claude:sonnet", "confidence": 0.7}})
+        self.assertEqual(got["model"], "claude:sonnet")
+
+
 class ApiTest(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.decision = {"decision": "pass"}

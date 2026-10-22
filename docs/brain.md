@@ -10,7 +10,8 @@ roster-brain is a local service that holds chats and agent sessions, and decides
   - `openrouter`: OpenRouter's chat completions API, key in `~/.config/secrets/openrouter-token`.
 - **Deciders**: decision models, asked first. Each gets the message, a short tail of the conversation and the catalog (models and fast tools), and returns one decision or passes. Kinds:
   - `openrouter`: any OpenRouter model asked for a JSON decision.
-  - `http`: a model behind a JSON endpoint (Jev goes here once its interface is known).
+  - `jev`: Jev, TypeSafe's System One model on OpenRouter (`~typesafe/jev-latest`), through OpenRouter's Decisions API (`POST /api/alpha/decisions`). Jev writes no text; it answers typed questions, so one request asks them all (what kind of message this is, the probability the answer is yes, whether the answer depends on something it cannot see, which tool, which model) and the decision is read off the answers. About 0.25 s.
+  - `http`: any model behind a JSON endpoint that speaks the contract below.
 - **Fast tools**: commands declared in the config that a decider may run directly, without an LLM.
 - **Router**: runs the deciders, applies the decision, falls back to the conversation's default model.
 
@@ -32,11 +33,11 @@ A decider returns JSON, one of:
 {"decision": "pass"}
 ```
 
-- `answer` and `tool` are taken only at or above the decider's `min_confidence` (default 0.9); below it they count as `pass`.
+- `answer` and `tool` are taken only at or above the decider's `min_confidence` (default 0.9, for `jev` 0.8); below it they count as `pass`. A `jev` decider answers yes or no only when Jev puts the probability at or beyond `answer_at` (default 0.9) and judges the answer not to depend on anything it was not shown. It only runs tools without arguments, since Jev cannot fill them in.
 - `route` names a model from the catalog; unknown models count as `pass`.
 - Deciders run in config order (`strategy = "first"`, the first non-pass wins) or all at once (`strategy = "race"`, the first non-pass to arrive wins). Each has its own `timeout_ms`; a timeout is a pass. When every decider passes, the conversation's default model answers.
 - An agent conversation only takes `answer` and `tool` from deciders, and they see only the new message, not the history (that is the agent's world, which they cannot see); anything else goes to its Claude session.
-- An `http` decider gets `POST <url>` with `{"text", "kind": "chat"|"agent", "history": [{"role", "content"}], "tools": [{"name", "description"}], "models": [{"id", "description"}]}` (and `Authorization: Bearer` from `token_file` when set) and answers with one decision object. This is a stand-in until Jev's own interface is known; an adapter in front of Jev can speak it.
+- An `http` decider gets `POST <url>` with `{"text", "kind": "chat"|"agent", "history": [{"role", "content"}], "tools": [{"name", "description"}], "models": [{"id", "description"}]}` (and `Authorization: Bearer` from `token_file` when set) and answers with one decision object. For a decision model of your own.
 - A fast tool's `command` may hold `{name}` placeholders, filled from the decision's `args`; a missing argument fails the turn rather than running a half-filled command. `timeout_s` (default 10) bounds it.
 - A message can skip the router: `"route": "model:<id>"` forces a model, `"route": "direct"` forces the conversation's default.
 
@@ -47,17 +48,17 @@ listen = "127.0.0.1:8791"
 default_model = "claude:sonnet"
 
 [[deciders]]
+name = "jev"
+kind = "jev"
+timeout_ms = 1500
+
+[[deciders]]
 name = "flash"
 kind = "openrouter"
 model = "google/gemini-3.5-flash-lite"
-timeout_ms = 1500
+timeout_ms = 2000
 min_confidence = 0.9
-
-[[deciders]]
-name = "jev"
-kind = "http"
-url = "http://127.0.0.1:9100/decide"
-timeout_ms = 300
+enabled = false
 
 [models]
 # Shown in the catalog; any other openrouter:<id> is still accepted when asked for by name.

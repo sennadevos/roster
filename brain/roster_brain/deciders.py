@@ -112,13 +112,78 @@ class HttpDecider(Decider):
             raise ProviderError("%s: %s" % (self.name, exc), "server")
 
 
+class JevDecider(Decider):
+    """Jev, TypeSafe's System One model on OpenRouter's Decisions API. It does not
+    write text: it answers typed questions (noul: a probability of yes; choice: one
+    of named criteria with a confidence). One request asks everything at once, and
+    the decision is read off the answers here."""
+
+    def __init__(self, spec, openrouter):
+        super().__init__(spec)
+        self.openrouter = openrouter
+        self.model = spec.get("model", "~typesafe/jev-latest")
+        # How sure Jev must be that the answer is yes (or no) before saying so.
+        self.answer_at = spec.get("answer_at", 0.9)
+        # Jev's confidences run lower than a chat model's self-reported ones.
+        self.min_confidence = spec.get("min_confidence", 0.8)
+
+    async def ask(self, text, history, tools, models, agent=False):
+        state = {"message": text}
+        if history:
+            state["recent_conversation"] = [{"role": m["role"], "content": m["content"][:500]} for m in history]
+        kinds = {"yes_no": "A question whose complete answer is yes or no",
+                 "task": "Anything else: explanations, writing, code, research, multi-step work, chat"}
+        if tools:
+            kinds["tool"] = "A request to run exactly one of the available tools, and nothing more"
+        questions = {
+            "kind": {"type": "choice", "instructions": "What does the user's message ask for?", "criteria": kinds},
+            "yes": {"type": "noul", "instructions": "Is the true answer to the user's question yes?"},
+            "hidden": {"type": "noul", "instructions": (
+                "Does a correct answer depend on anything not shown here, such as earlier messages, files, "
+                "projects, machines, or what someone did before?" if agent or not history else
+                "Does a correct answer depend on anything not shown here, such as files, projects, machines, "
+                "or what someone did outside this conversation?")},
+        }
+        if tools:
+            questions["tool"] = {"type": "choice", "instructions": "Which tool does the user ask to run?",
+                                 "criteria": dict(tools, none="No tool is asked for")}
+        if models and not agent:
+            questions["model"] = {"type": "choice", "instructions": "Which model should answer this message?",
+                                  "criteria": dict(models)}
+        got = await self.openrouter.decisions(self.model, state, questions, self.timeout)
+        return self.read(got.get("answers") or {})
+
+    def read(self, a):
+        tool = a.get("tool") or {}
+        # The tool question is sharper than the kind question: Jev may waver on
+        # "is this a tool request" yet be sure which tool it names.
+        if tool.get("choice") and tool["choice"] != "none":
+            return {"decision": "tool", "tool": tool["choice"], "args": {}, "confidence": tool.get("confidence") or 0}
+        kind = a.get("kind") or {}
+        hidden = (a.get("hidden") or {}).get("noul", 1)
+        if kind.get("choice") == "yes_no":
+            yes = (a.get("yes") or {}).get("noul")
+            if hidden >= 0.5 or yes is None:
+                return None
+            sure = max(yes, 1 - yes)
+            if sure < self.answer_at:
+                return None
+            return {"decision": "answer", "text": "Yes." if yes > 0.5 else "No.",
+                    "confidence": min(kind.get("confidence") or 0, sure)}
+        model = a.get("model") or {}
+        if kind.get("choice") == "task" and model.get("choice"):
+            return {"decision": "route", "model": model["choice"], "confidence": model.get("confidence") or 0}
+        return None
+
+
 def build(cfg, session, openrouter):
     out = []
     for spec in cfg["deciders"]:
         if spec.get("enabled", True) is False:
             continue
-        out.append(OpenRouterDecider(spec, openrouter) if spec["kind"] == "openrouter"
-                   else HttpDecider(spec, session))
+        kind = {"openrouter": lambda: OpenRouterDecider(spec, openrouter), "jev": lambda: JevDecider(spec, openrouter),
+                "http": lambda: HttpDecider(spec, session)}[spec["kind"]]
+        out.append(kind())
     return out
 
 
@@ -141,6 +206,8 @@ def valid(decider, got, tools, models, allow_route):
             return None
     elif kind == "route":
         if not allow_route or got.get("model") not in models:
+            return None
+        if conf < decider.spec.get("route_confidence", 0):
             return None
     got["confidence"] = conf
     return got

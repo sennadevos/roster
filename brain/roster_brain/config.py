@@ -52,8 +52,8 @@ def check(cfg):
         raise ConfigError("strategy must be first or race, not %r" % cfg["strategy"])
     names = set()
     for d in cfg["deciders"]:
-        if not d.get("name") or d.get("kind") not in ("openrouter", "http"):
-            raise ConfigError("every [[deciders]] needs a name and kind = openrouter or http: %r" % d)
+        if not d.get("name") or d.get("kind") not in ("openrouter", "jev", "http"):
+            raise ConfigError("every [[deciders]] needs a name and kind = openrouter, jev or http: %r" % d)
         if d["name"] in names:
             raise ConfigError("two deciders named %s" % d["name"])
         names.add(d["name"])

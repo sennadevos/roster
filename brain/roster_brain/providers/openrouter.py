@@ -7,6 +7,7 @@ import aiohttp
 from .base import ChatProvider, ProviderError
 
 URL = "https://openrouter.ai/api/v1/chat/completions"
+DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
 HEADERS = {"HTTP-Referer": "https://github.com/sennadevos/roster", "X-Title": "roster-brain"}
 
 
@@ -44,6 +45,21 @@ class OpenRouter(ChatProvider):
         except aiohttp.ClientError as exc:
             raise ProviderError("openrouter: %s" % exc, "server")
         return data["choices"][0]["message"].get("content") or ""
+
+    async def decisions(self, model, state, questions, timeout):
+        """One Decisions API request (System One models such as Jev); returns the response."""
+        body = {"model": model, "state": state, "questions": questions}
+        try:
+            async with self.session.post(DECISIONS_URL, json=body, headers=self.headers(),
+                                         timeout=aiohttp.ClientTimeout(total=timeout)) as r:
+                data = await r.json(content_type=None)
+                if r.status != 200 or "error" in data:
+                    err = data.get("error") or {}
+                    raise ProviderError("openrouter decisions %s: %s" % (r.status, err.get("message", data)),
+                                        error_kind(err.get("code") or r.status))
+        except aiohttp.ClientError as exc:
+            raise ProviderError("openrouter decisions: %s" % exc, "server")
+        return data
 
     async def stream(self, model, messages, system=None):
         msgs = ([{"role": "system", "content": system}] if system else []) + messages

@@ -61,7 +61,7 @@ Config is `~/.config/roster/hub.toml`: `listen` (a private `host:port`; the hub 
 
 ## Chats and agents: roster-brain
 
-`roster-brain` holds chats and Claude agent sessions behind one router. Decision models (a fast OpenRouter model, or Jev behind an HTTP endpoint) see each message first and answer a yes/no themselves, run a declared fast tool, or pick the model that answers: an OpenRouter model or Claude on the machine's own subscription login (Agent SDK, never an API key). Frontends such as a launcher bar talk to its HTTP API on `127.0.0.1:8791`. The design and API are in [docs/brain.md](docs/brain.md).
+`roster-brain` holds chats and Claude agent sessions behind one router. Decision models (Jev on OpenRouter's Decisions API, a fast chat model, or your own endpoint) see each message first and answer a yes/no themselves, run a declared fast tool, or pick the model that answers: an OpenRouter model or Claude on the machine's own subscription login (Agent SDK, never an API key). Frontends such as a launcher bar talk to its HTTP API on `127.0.0.1:8791`. The design and API are in [docs/brain.md](docs/brain.md).
 
 ```sh
 roster install --brain        # its venv, plus the roster-brain user unit
