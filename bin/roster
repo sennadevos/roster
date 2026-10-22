@@ -2922,8 +2922,8 @@ def push_install(target, extra=()):
     """Install this version of roster on another machine, over the user's own SSH."""
     with tempfile.TemporaryDirectory() as tmp:
         tarball = os.path.join(tmp, "roster.tgz")
-        files = [f for f in ("bin", "share", "install.sh") if os.path.exists(os.path.join(CODE, f))]
-        proc = run(["tar", "-czf", tarball, "-C", CODE] + files)
+        files = [f for f in ("bin", "share", "brain", "install.sh") if os.path.exists(os.path.join(CODE, f))]
+        proc = run(["tar", "-czf", tarball, "--exclude=.venv", "--exclude=__pycache__", "-C", CODE] + files)
         if proc.returncode != 0:
             raise Fail("tar: %s" % proc.stderr.strip())
         script = ('set -e; d=$(mktemp -d); trap \'rm -rf "$d"\' EXIT; tar -xz -C "$d"; '

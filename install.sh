@@ -62,7 +62,9 @@ dest="$PREFIX/versions/$version"
 mkdir -p "$dest"
 # install.sh comes along, so `roster peer add` can install this same version elsewhere.
 if [ -n "$FROM" ]; then
-    cp -R "$FROM/bin" "$FROM/share" "$FROM/brain" "$FROM/install.sh" "$dest/"
+    cp -R "$FROM/bin" "$FROM/share" "$FROM/install.sh" "$dest/"
+    # brain/ arrived after 0.3.0; a push from an older roster has none.
+    if [ -d "$FROM/brain" ]; then cp -R "$FROM/brain" "$dest/"; fi
     # A checkout's own dev venv and caches are not part of a version.
     rm -rf "$dest/brain/.venv"
     find "$dest" -name __pycache__ -type d -prune -exec rm -rf {} +
