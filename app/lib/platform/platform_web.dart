@@ -41,8 +41,12 @@ Future<bool> copyText(String text) async {
   return ok;
 }
 
-/// Load the page again, for a new version of the app.
-void reloadPage() => web.window.location.reload();
+/// Load the page again, for a new version of the app, without the
+/// "leave the page?" question that guards against Ctrl+W (web/index.html).
+void reloadPage() {
+  web.document.documentElement!.setAttribute('data-leaving', '1');
+  web.window.location.reload();
+}
 
 class _LocalStorage implements StringStorage {
   @override

@@ -66,7 +66,7 @@ void main() {
         // `next` is the last line read, as roster gives it.
         return {'agent': 'a@m', 'session_id': 's', 'messages': rows, 'next': transcript.last['i'] as int};
       },
-      'POST /v1/prompt': (_, __) => {'ok': true},
+      'POST /v1/prompt': (_, _) => {'ok': true},
     });
     final c = Conversation(hub.client(Uri.parse('https://hub'), 'tok-1'), 'a@m', pageSize: 10);
     await c.loadTail();

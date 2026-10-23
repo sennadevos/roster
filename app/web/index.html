@@ -42,6 +42,16 @@
 </head>
 <body>
   <div id="splash" aria-hidden="true"><img src="favicon.svg" alt=""></div>
+  <script>
+    // Chromium never hands Ctrl+W to a page, so it cannot be stopped; it can
+    // only be asked about. Closing (or reloading) asks first, except when the
+    // app reloads itself for an update (reloadPage marks the page leaving).
+    window.addEventListener('beforeunload', (e) => {
+      if (document.documentElement.dataset.leaving) return;
+      e.preventDefault();
+      e.returnValue = '';
+    });
+  </script>
   <script src="flutter_bootstrap.js" async></script>
 </body>
 </html>
