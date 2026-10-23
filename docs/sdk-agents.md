@@ -20,7 +20,7 @@ The runner drives the session through the SDK instead of a screen:
 | | Claude Code agent | SDK agent |
 |---|---|---|
 | Status | from hooks | written by the runner as it happens (`working`, `idle`, `blocked`) |
-| Prompt | typed into the session; refused while text sits in its input | queued by the runner; one that arrives during a turn runs after it |
+| Prompt | typed into the session; refused while text sits in its input | sent at once; during a turn Claude takes it in at its next step, as Claude Code does with a message typed mid-turn |
 | Interrupt | (Esc in its window) | `roster interrupt`, Esc or ^C in its window, `POST /v1/interrupt` |
 | Model | at start (`--model`, `resume --model`) | live: `roster model`, `/model` in its window, `POST /v1/model` |
 | Effort | at start | live: `roster effort`, `/effort` in its window, `POST /v1/effort` |
@@ -32,7 +32,7 @@ The model and effort it runs with are kept in its entry, so a park or resume sta
 
 ## Its window
 
-The output scrolls above a status line (name, status, model, effort) and an input line. Enter sends; a prompt sent while it works is queued. Esc or ^C interrupts a turn (^C first clears typed text). `/model <name>`, `/effort <level>` and `/interrupt` are handled by the runner; other `/commands` go to Claude. While a dialog is open, type an option's number, or text for its free-text option, or Esc to decline.
+The output scrolls above a status line (name, status, model, effort) and an input line. Enter sends, also while it works. Esc or ^C interrupts a turn (^C first clears typed text). `/model <name>`, `/effort <level>` and `/interrupt` are handled by the runner; other `/commands` go to Claude. While a dialog is open, type an option's number, or text for its free-text option, or Esc to decline.
 
 ## The control socket
 

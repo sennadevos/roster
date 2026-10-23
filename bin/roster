@@ -112,6 +112,7 @@ def _hook_fast_path():
 _hook_fast_path()
 
 import argparse  # noqa: E402 -- after the fast path on purpose
+import collections  # noqa: E402
 import concurrent.futures  # noqa: E402
 import getpass  # noqa: E402
 import glob  # noqa: E402
@@ -2614,6 +2615,45 @@ def block_text(content):
     return ""
 
 
+def tag_text(text, name):
+    m = re.search(r"<%s>(.*?)</%s>" % (name, name), text, re.S)
+    return m.group(1).strip() if m else None
+
+
+def readable(text):
+    """A user line as roster shows it: (role, text), or None to leave it out.
+
+    Claude Code records some things as user text in tags of its own: a
+    background task's notification, a slash command and its output, a `!`
+    shell command and its output. Those become what the user typed (the
+    command) or an `event` line (what came back), not raw tags.
+    """
+    # Pasted text is the user's own; only its wrapper goes.
+    t = re.sub(r"</?pasted_content[^>]*>", "", text).strip()
+    if not t.startswith("<"):
+        return ("user", t) if t else None
+    if t.startswith("<task-notification>"):
+        return ("event", tag_text(t, "summary") or "A background task changed")
+    if t.startswith(("<command-name>", "<command-message>")):
+        name = tag_text(t, "command-name") or "/" + (tag_text(t, "command-message") or "")
+        return ("user", (name + " " + (tag_text(t, "command-args") or "")).strip())
+    if t.startswith(("<local-command-stdout>", "<local-command-stderr>")):
+        out = re.sub(r"\x1b\[[0-9;]*m", "", tag_text(t, "local-command-stdout") or tag_text(t, "local-command-stderr") or "")
+        return ("event", out[:2000]) if out else None
+    if t.startswith("<local-command-caveat>"):
+        return None
+    if t.startswith("<bash-input>"):
+        return ("user", "! " + (tag_text(t, "bash-input") or ""))
+    if t.startswith(("<bash-stdout>", "<bash-stderr>")):
+        out = "\n".join(x for x in (tag_text(t, "bash-stdout"), tag_text(t, "bash-stderr")) if x)
+        return ("event", out[:2000]) if out else None
+    if t.startswith("<agent-message"):
+        return None  # a subagent's report to its agent, not the user's words
+    if t.startswith("<cross-session-message"):
+        return ("event", "A message from another Claude session")
+    return ("user", t)
+
+
 def read_transcript(session_id, after=None, limit=200, before=None):
     """The conversation as messages: user and assistant texts, and tool calls with their results.
 
@@ -2622,7 +2662,45 @@ def read_transcript(session_id, after=None, limit=200, before=None):
     arrived later (same `i`, to merge). With `before`, the last `limit` messages
     before that line, for scrolling back. With neither, the last `limit`.
     """
+    # A prompt sent while Claude works is queued: Claude Code records it at
+    # once (queue-operation enqueue), and when it is taken in either as an
+    # attachment (mid-turn) or as a user line (a new turn). It shows from the
+    # enqueue on, marked queued until it is taken in, and only once.
     messages, tools, updated, last = [], {}, set(), 0
+    queued = []  # everything in Claude's queue, oldest first: [raw content, its message or None]
+    taken = collections.Counter()  # texts taken in from the queue, whose later record is a repeat
+    events = set()
+
+    def take(entry, i):
+        """A queued prompt was taken in: no longer queued, and its later records are repeats."""
+        queued.remove(entry)
+        m = entry[1]
+        if m:
+            m["queued"] = False
+            if after is not None and m["i"] <= after < i:
+                updated.add(m["i"])
+        return m
+
+    def add_user(i, at, text):
+        got = readable(text)
+        if not got:
+            return
+        role, body = got
+        if role == "event":
+            if body not in events:  # a notification can be recorded twice
+                events.add(body)
+                messages.append({"i": i, "at": at, "role": "event", "text": body})
+            return
+        if taken[body]:
+            taken[body] -= 1
+            return
+        # Taken in before the queue said so (the records come in either order).
+        entry = next((q for q in queued if q[1] and q[1]["text"] == body), None)
+        if entry:
+            take(entry, i)
+            return
+        messages.append({"i": i, "at": at, "role": "user", "text": body})
+
     with open(transcript_path(session_id)) as f:
         for i, line in enumerate(f, 1):
             last = i
@@ -2630,11 +2708,44 @@ def read_transcript(session_id, after=None, limit=200, before=None):
                 rec = json.loads(line)
             except ValueError:
                 continue
-            if rec.get("isMeta") or rec.get("isSidechain") or rec.get("type") not in ("user", "assistant"):
+            kind = rec.get("type")
+            at = local_stamp(rec.get("timestamp"))
+            if kind == "queue-operation":
+                op, content = rec.get("operation"), rec.get("content") or ""
+                if op == "enqueue":
+                    got = readable(content)
+                    m = None
+                    if got and got[0] == "user":
+                        m = {"i": i, "at": at, "role": "user", "text": got[1], "queued": True}
+                        messages.append(m)
+                    queued.append([content, m])
+                elif op in ("dequeue", "remove") and queued:
+                    # A remove names its text; a dequeue never does: it takes the oldest.
+                    entry = next((q for q in queued if q[0] == content), None) if content else queued[0]
+                    if entry:
+                        m = take(entry, i)
+                        if m:
+                            taken[m["text"]] += 1
+                elif op == "popAll":
+                    # Pulled back into the input to edit: never sent as it was.
+                    for entry in list(queued):
+                        m = take(entry, i)
+                        if m:
+                            m["withdrawn"] = True
+                    queued.clear()
+                continue
+            if kind == "attachment":
+                a = rec.get("attachment") or {}
+                if a.get("type") == "queued_command" and isinstance(a.get("prompt"), str) and not rec.get("isSidechain"):
+                    add_user(i, at, a["prompt"])
+                continue
+            if rec.get("isMeta") or rec.get("isSidechain") or kind not in ("user", "assistant"):
                 continue
             msg = rec.get("message") or {}
-            at = local_stamp(rec.get("timestamp"))
             content = msg.get("content")
+            if rec["type"] == "user" and rec.get("isCompactSummary"):
+                messages.append({"i": i, "at": at, "role": "event", "text": "Conversation compacted"})
+                continue
             if rec["type"] == "user":
                 if isinstance(content, list) and any(isinstance(b, dict) and b.get("type") == "tool_result"
                                                      for b in content):
@@ -2647,9 +2758,7 @@ def read_transcript(session_id, after=None, limit=200, before=None):
                             if after is not None and t["i"] <= after < i:
                                 updated.add(t["i"])
                     continue
-                text = block_text(content).strip()
-                if text:
-                    messages.append({"i": i, "at": at, "role": "user", "text": text})
+                add_user(i, at, block_text(content))
                 continue
             for b in content if isinstance(content, list) else [{"type": "text", "text": content or ""}]:
                 if not isinstance(b, dict):
@@ -2667,7 +2776,7 @@ def read_transcript(session_id, after=None, limit=200, before=None):
     elif after is None:
         out = messages[-limit:] if limit else messages
     else:
-        out = [m for m in messages if m["i"] > after or (m["role"] == "tool" and m["i"] in updated)][:limit or None]
+        out = [m for m in messages if m["i"] > after or m["i"] in updated][:limit or None]
     return out, max(last, after or 0)
 
 

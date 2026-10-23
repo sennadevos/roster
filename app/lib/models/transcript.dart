@@ -10,18 +10,26 @@ class Message {
     this.tool,
     this.result,
     this.error = false,
+    this.queued = false,
+    this.withdrawn = false,
   });
 
   /// The transcript JSONL line number; larger is newer.
   final int i;
 
-  /// `user`, `assistant` or `tool`.
+  /// `user`, `assistant`, `tool` or `event` (a task finished, a command's output).
   final String role;
   final String text;
   final DateTime? at;
   final String? tool;
   final String? result;
   final bool error;
+
+  /// A prompt sent while the agent worked, not yet taken in by Claude.
+  final bool queued;
+
+  /// A queued prompt pulled back into the input to edit: never sent as it was.
+  final bool withdrawn;
 
   /// Identity within a transcript, to drop duplicates when pages overlap.
   String get key => '$i/$role/${tool ?? ''}/${text.hashCode}';
@@ -34,6 +42,8 @@ class Message {
         tool: json['tool'] as String?,
         result: json['result'] as String?,
         error: json['error'] == true,
+        queued: json['queued'] == true,
+        withdrawn: json['withdrawn'] == true,
       );
 }
 

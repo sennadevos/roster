@@ -9,7 +9,7 @@ a Unix socket instead of typing keys into it. See docs/sdk-agents.md.
 The socket takes one JSON request per connection and answers with one JSON line:
   {"op": "status"}                       status, model, effort, dialog, queued, input
   {"op": "screen"}                       the last lines shown, and the open dialog
-  {"op": "prompt", "text": ...}          a prompt as the user; queued while a turn runs
+  {"op": "prompt", "text": ...}          a prompt as the user; mid-turn, Claude takes it in at its next step
   {"op": "interrupt"}                    stop the turn in progress
   {"op": "model", "model": ...}          switch model, live
   {"op": "effort", "effort": ...}        switch effort, live
@@ -338,6 +338,7 @@ class Runner:
         self.interrupting = False
         self.revives = 0
         self.revive_task = None
+        self.turn_started = time.monotonic()
         self.started = transcript_exists(session_id)
         self.term = Terminal(self.submit, self.key)
         self.loop = None
@@ -414,8 +415,6 @@ class Runner:
 
     def prompt(self, text, source):
         self.queue.put_nowait((text, source))
-        if self.status == "working" or self.status == "blocked":
-            self.term.print("(queued) %s" % text.splitlines()[0][:200], DIM)
         self.draw_status()
 
     # -- controls ----------------------------------------------------------------
@@ -612,34 +611,47 @@ class Runner:
                 pass
 
     async def serve(self, client):
+        """Send prompts as they come and read the session's output all along.
+
+        A prompt sent while a turn runs goes straight to Claude, which takes it
+        in at its next step, as Claude Code does with a message typed mid-turn
+        (and records it the same way), or starts a new turn with it after."""
         if self.status != "idle":
             self.set_status("idle")
         self.term.print("%s · %s · %s" % (self.name, self.cwd, "resumed" if self.started else "new session"), DIM)
-        while True:
-            text, source = await self.queue.get()
-            self.term.print("❯ %s" % text, BOLD)
-            self.interrupting = False
-            self.set_status("working")
-            await client.query(text)
-            ok = await self.pump(client)
-            self.started = True
-            if ok:
-                self.revives = 0
-            self.set_status("idle", **({"stalled": None} if ok else {}))
+        reader = asyncio.ensure_future(self.read(client))
+        try:
+            while True:
+                getter = asyncio.ensure_future(self.queue.get())
+                done, _ = await asyncio.wait({getter, reader}, return_when=asyncio.FIRST_COMPLETED)
+                if reader in done:
+                    getter.cancel()
+                    reader.result()  # raises what ended it
+                    raise RuntimeError("the session's output ended")
+                text, _source = getter.result()
+                self.term.print("❯ %s" % text, BOLD)
+                if self.status != "working":
+                    self.interrupting = False
+                    self.turn_started = time.monotonic()
+                    self.set_status("working")
+                await client.query(text)
+        finally:
+            reader.cancel()
 
-    async def pump(self, client):
-        """Show one turn's messages; True when it ended normally (or by interrupt)."""
+    async def read(self, client):
+        """Every message of the session, shown as it comes; a result ends a turn."""
         streamed = ""  # text already shown from deltas this turn
-        tools = {}
-        t0 = time.monotonic()
-        async for m in client.receive_response():
+        async for m in client.receive_messages():
+            if not isinstance(m, (ResultMessage, SystemMessage, RateLimitEvent)) and self.status == "idle":
+                # A turn the CLI started by itself, e.g. with a prompt queued at the end of the last.
+                self.turn_started = time.monotonic()
+                self.set_status("working")
             if isinstance(m, SystemMessage):
                 if m.subtype == "init":
                     if m.data.get("apiKeySource") not in (None, "none"):
-                        await client.interrupt()
                         self.term.print("refusing to run on an API key (apiKeySource %s); the subscription "
                                         "login is required" % m.data.get("apiKeySource"), RED)
-                        return False
+                        raise RuntimeError("not on the subscription login")
                     self.model = self.model or m.data.get("model")
             elif isinstance(m, StreamEvent):
                 if m.parent_tool_use_id:
@@ -663,7 +675,6 @@ class Runner:
                     if isinstance(b, TextBlock) and b.text.strip() and b.text.strip() not in streamed:
                         self.term.print("⏺ " + b.text)
                     elif isinstance(b, ToolUseBlock):
-                        tools[b.id] = b.name
                         self.term.print("  ⏺ %s(%s)" % (b.name, tool_summary(b.name, b.input)), CYAN)
             elif isinstance(m, UserMessage):
                 if m.parent_tool_use_id or not isinstance(m.content, list):
@@ -680,18 +691,20 @@ class Runner:
                     self.term.print("subscription rate limit reached (%s)" % m.rate_limit_info.rate_limit_type, RED)
             elif isinstance(m, ResultMessage):
                 self.term.close_line()
+                streamed = ""
+                self.started = True
                 aborted = (m.terminal_reason or "").startswith("aborted") or self.interrupting
                 if m.is_error and not aborted:
                     msg = (m.result or "; ".join(m.errors or []) or m.subtype or "")[:200]
                     kind = "rate_limit" if m.api_error_status == 429 else (
                         "server_error" if (m.api_error_status or 0) >= 500 else "unknown")
                     self.term.print("turn failed: %s" % msg, RED)
-                    update_entry(self.sid, stalled={"error": kind, "at": now(), "message": msg})
+                    self.set_status("idle", stalled={"error": kind, "at": now(), "message": msg})
                     self.schedule_revive(kind)
-                    return False
-                self.term.print("  %.1fs" % (time.monotonic() - t0), DIM)
-                return True
-        return True
+                    continue
+                self.term.print("  %.1fs" % (time.monotonic() - self.turn_started), DIM)
+                self.revives = 0
+                self.set_status("idle", stalled=None)
 
     def schedule_revive(self, kind):
         """After an API error, carry on by itself once it may work again."""

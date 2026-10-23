@@ -25,7 +25,8 @@ The agent's Claude conversation, from its transcript JSONL (`~/.claude/projects/
 ```
 
 - `i` is the JSONL line number (from 1). `--after I` returns the first `--limit` messages with a larger `i`, plus earlier tool calls whose result arrived after `I` (same `i`, to merge); `next` is what to pass next time. `--before I` returns the last `--limit` messages with a smaller `i`, for scrolling back. With neither, the last `--limit` (default 200).
-- `role`: `user` (what the user, a wake or a hook-injected prompt typed), `assistant` (text Claude wrote), `tool` (a tool call, with its result folded in once it exists; `text` is a one-line summary: the command, the file path, the query).
+- `role`: `user` (what the user, a wake or a hook-injected prompt typed; a slash command as `/name args`, a shell command as `! cmd`), `assistant` (text Claude wrote), `tool` (a tool call, with its result folded in once it exists; `text` is a one-line summary: the command, the file path, the query), `event` (something that happened rather than was said: a background task's summary, a slash command's output, "Conversation compacted").
+- A prompt sent while the agent works is queued by Claude until its next step. It is listed from the moment it is queued, with `"queued": true`, and comes again with the same `i` and `"queued": false` once Claude has taken it in (merge it like a tool's result). One pulled back into the input to edit comes again with `"withdrawn": true`: it was never sent as it was.
 - Skipped: meta lines, thinking blocks, system/summary lines, empty texts.
 
 ### `roster screen <agent> --json`

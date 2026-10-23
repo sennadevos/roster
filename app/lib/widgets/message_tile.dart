@@ -21,12 +21,18 @@ Widget inColumn(Widget child) => Center(
 
 /// What the user typed: a bubble on the right.
 class UserBubble extends StatelessWidget {
-  const UserBubble(this.text, {super.key, this.pending = false});
+  const UserBubble(this.text, {super.key, this.pending = false, this.queued = false, this.withdrawn = false});
 
   final String text;
 
   /// Sent but not yet in the transcript.
   final bool pending;
+
+  /// In the transcript, waiting for Claude to take it in at its next step.
+  final bool queued;
+
+  /// Pulled back into the agent's input to edit: never sent as it was.
+  final bool withdrawn;
 
   @override
   Widget build(BuildContext context) {
@@ -38,7 +44,7 @@ class UserBubble extends StatelessWidget {
         alignment: Alignment.centerRight,
         child: AnimatedOpacity(
           duration: const Duration(milliseconds: 200),
-          opacity: pending ? 0.6 : 1,
+          opacity: pending || withdrawn ? 0.6 : queued ? 0.8 : 1,
           child: Container(
             constraints: BoxConstraints(maxWidth: min(box.maxWidth * 0.82, 620)),
             margin: const EdgeInsets.fromLTRB(48, 8, 16, 8),
@@ -56,11 +62,25 @@ class UserBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.end,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(text, style: theme.textTheme.bodyMedium?.copyWith(color: cs.onSurface)),
+                Text(text,
+                    style: theme.textTheme.bodyMedium?.copyWith(
+                      color: cs.onSurface,
+                      decoration: withdrawn ? TextDecoration.lineThrough : null,
+                    )),
                 if (pending)
                   Padding(
                     padding: const EdgeInsets.only(top: 2),
                     child: Icon(Icons.schedule, size: 12, color: cs.outline),
+                  ),
+                if (queued || withdrawn)
+                  Padding(
+                    padding: const EdgeInsets.only(top: 3),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      Icon(withdrawn ? Icons.undo : Icons.schedule, size: 12, color: cs.outline),
+                      const SizedBox(width: 4),
+                      Text(withdrawn ? 'taken back to edit' : 'queued: Claude takes it in at its next step',
+                          style: theme.textTheme.labelSmall?.copyWith(color: cs.outline)),
+                    ]),
                   ),
               ],
             ),
@@ -68,6 +88,41 @@ class UserBubble extends StatelessWidget {
         ),
       );
     });
+  }
+}
+
+/// Something that happened rather than was said: a background task's
+/// summary, a slash command's output, a compaction. A quiet line of its own.
+class EventLine extends StatelessWidget {
+  const EventLine(this.text, {super.key});
+
+  final String text;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 6, 20, 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(Icons.info_outline, size: 14, color: cs.outline),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              text,
+              maxLines: 6,
+              overflow: TextOverflow.ellipsis,
+              style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+            ),
+          ),
+        ],
+      ),
+    );
   }
 }
 

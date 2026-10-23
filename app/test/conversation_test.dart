@@ -53,4 +53,37 @@ void main() {
     expect(c.messages.first.text, 'm1');
     expect(c.hasOlder, isFalse);
   });
+
+  test('a prompt queued while the agent works shows at once, then as taken in', () async {
+    var transcript = <Map<String, dynamic>>[
+      {'i': 1, 'role': 'user', 'text': 'start'},
+      {'i': 2, 'role': 'tool', 'tool': 'Bash', 'text': 'sleep 9', 'result': 'ok'},
+    ];
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) {
+        final after = q['after'] == null ? null : int.parse(q['after']!);
+        final rows = after == null ? transcript : transcript.where((m) => (m['i'] as int) > after).toList();
+        // `next` is the last line read, as roster gives it.
+        return {'agent': 'a@m', 'session_id': 's', 'messages': rows, 'next': transcript.last['i'] as int};
+      },
+      'POST /v1/prompt': (_, __) => {'ok': true},
+    });
+    final c = Conversation(hub.client(Uri.parse('https://hub'), 'tok-1'), 'a@m', pageSize: 10);
+    await c.loadTail();
+
+    transcript = [...transcript, {'i': 3, 'role': 'user', 'text': 'and also this', 'queued': true}];
+    await c.send('and also this');
+    expect(c.pending, isEmpty);
+    expect(c.messages.last.queued, isTrue);
+
+    // Claude takes it in: the same line comes back no longer queued.
+    transcript = [
+      ...transcript.sublist(0, 2),
+      {'i': 3, 'role': 'user', 'text': 'and also this', 'queued': false},
+      {'i': 5, 'role': 'event', 'text': 'Background command "build" completed (exit code 0)'},
+    ];
+    await c.fetchNew();
+    expect(c.messages.where((m) => m.text == 'and also this').single.queued, isFalse);
+    expect(c.messages.last.role, 'event');
+  });
 }

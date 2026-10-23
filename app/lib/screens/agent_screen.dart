@@ -440,7 +440,10 @@ class _AgentScreenState extends State<AgentScreen> {
         final key = 'g/${run.first.key}';
         out.add(_Item(key, [for (final r in run) r.key], () => ToolGroup(run, key: ValueKey(key))));
       } else if (m.role == 'user') {
-        out.add(_Item(m.key, [m.key], () => UserBubble(m.text, key: ValueKey(m.key))));
+        out.add(_Item(m.key, [m.key],
+            () => UserBubble(m.text, key: ValueKey(m.key), queued: m.queued, withdrawn: m.withdrawn)));
+      } else if (m.role == 'event') {
+        out.add(_Item(m.key, [m.key], () => EventLine(m.text, key: ValueKey(m.key))));
       } else {
         out.add(_Item(m.key, [m.key], () => AssistantBlock(m.text, key: ValueKey(m.key))));
       }

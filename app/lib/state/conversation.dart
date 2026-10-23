@@ -156,12 +156,13 @@ class Conversation extends ChangeNotifier {
   }
 
   /// Where to fetch new messages from: just before the oldest recent tool
-  /// call still without a result, since the result is folded into that
-  /// earlier line; else [next].
+  /// call still without a result, or prompt still queued, since the result
+  /// (or the queued prompt being taken in) comes back on that earlier line;
+  /// else [next].
   int _cursor() {
     final recent = messages.length > 20 ? messages.sublist(messages.length - 20) : messages;
     for (final m in recent) {
-      if (m.role == 'tool' && m.result == null) return min(next!, m.i - 1);
+      if ((m.role == 'tool' && m.result == null) || m.queued) return min(next!, m.i - 1);
     }
     return next!;
   }
@@ -213,7 +214,15 @@ class Conversation extends ChangeNotifier {
       _changed();
       rethrow;
     }
-    for (final wait in const [Duration(milliseconds: 600), Duration(seconds: 2), Duration(seconds: 5)]) {
+    // A prompt sent while the agent works shows up (as queued) as soon as
+    // Claude queues it; a starting agent may take a while longer.
+    for (final wait in const [
+      Duration(milliseconds: 600),
+      Duration(seconds: 2),
+      Duration(seconds: 5),
+      Duration(seconds: 10),
+      Duration(seconds: 20),
+    ]) {
       await Future<void>.delayed(wait);
       if (_disposed || !pending.contains(t)) return;
       await fetchNew();
