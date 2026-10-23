@@ -73,13 +73,18 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 | `POST /v1/answer` | `{"agent", "key", "text"}`: type your own answer into the dialog's free-text option (`input: true`) and submit it | `{"ok": true}` |
 | `POST /v1/keys` | `{"agent", "keys": [...]}` | `{"ok": true}` |
 | `POST /v1/new` with `{"brief"}` | a pasted brief: it becomes the first prompt, and roster decides name, role, machine, folder (new under ~/Desktop when needed), model and effort | `{"agent", "plan": {"name", "role", "machine", "folder", "new_folder", "model", "effort", "confidence": {"machine", "folder", "model"}, "why"}}` |
-| `POST /v1/new` | `{"machine", "cwd", "name", "role", "prompt", "model", "effort"}` (all but `machine` optional; `effort` is `low`, `medium`, `high`, `xhigh` or `max`; `model` an alias such as `opus` or a full model name) | `{"agent"}` |
+| `POST /v1/new` | `{"machine", "cwd", "name", "role", "prompt", "model", "effort", "harness"}` (all but `machine` optional; `effort` is `low`, `medium`, `high`, `xhigh` or `max`; `model` an alias such as `opus` or a full model name; `harness` `sdk` (the default) or `claude`) | `{"agent"}` |
 | `POST /v1/resume` | `{"agent"}` | `{"ok": true}` |
 | `POST /v1/kill` | `{"agent"}` | `{"ok": true}` |
+| `POST /v1/interrupt` | `{"agent"}`: stop the turn in progress (SDK agents) | `{"ok": true, "interrupted": bool}` |
+| `POST /v1/model` | `{"agent", "model"}`: switch model, live (SDK agents) | `{"ok": true, "model"}` |
+| `POST /v1/effort` | `{"agent", "effort"}`: switch effort, live (SDK agents) | `{"ok": true, "effort"}` |
 | `POST /v1/push` | `{"endpoint"}` (UnifiedPush endpoint URL), or `{"endpoint": null}` to stop | `{"ok": true}` |
 | `GET /v1/devices` | | `{"devices": [{"id", "name", "created", "last_seen", "push": bool, "current": bool}]}` |
 | `DELETE /v1/devices/{id}` | | `{"ok": true}` |
 | `GET /v1/events` | | Server-Sent Events, see below |
+
+An agent row's `harness` says what runs it: `sdk` (roster's Agent SDK runner, docs/sdk-agents.md) or `claude` (Claude Code). For an `sdk` agent, `model` and `effort` in its row are the live ones; `screen` returns the runner's recent output and its open dialog in the same shape as a Claude Code dialog, and `keys` with a digit picks an option (`Escape` declines). Interrupt, model and effort refuse a `claude` agent.
 
 The hub runs the CLI as `roster <command> … --json` (path from `ROSTER_BIN`, default `~/.local/bin/roster`) with a timeout, and passes its errors on as 4xx (`roster: …` text as `error`).
 

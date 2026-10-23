@@ -75,7 +75,12 @@ def main():
     a.add_argument("--route")
     a.add_argument("-v", "--verbose", action="store_true")
     a.add_argument("text", nargs="+")
+    r = sub.add_parser("agent", help="run one SDK agent (roster starts this in its tmux session)")
+    r.add_argument("session_id")
     args = p.parse_args()
+    if args.cmd == "agent":
+        from .runner import main as run_agent
+        return run_agent(args.session_id) or 0
     try:
         cfg = config_mod.load(args.config)
     except config_mod.ConfigError as exc:

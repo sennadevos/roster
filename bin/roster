@@ -16,6 +16,17 @@ Agents run on one of two backends, recorded per entry as `backend`:
   herdr  an agent in a herdr pane. herdr knows its live state, so the roster
          caches what herdr reports. Entries without a `backend` are herdr.
 
+A tmux agent runs one of two harnesses, recorded as `harness`:
+
+  claude Claude Code's own TUI. Status comes from its hooks; roster drives it
+         by typing into the session.
+  sdk    roster's runner on the Claude Agent SDK (`roster-brain agent`), with
+         its own small terminal UI. It writes its own status and takes prompts,
+         interrupts, model and effort switches and dialog answers on a control
+         socket. New agents get this one unless config.toml says
+         `harness = "claude"` or `new --harness claude` asks for it; an agent
+         keeps the harness it started with. See docs/sdk-agents.md.
+
 Either way an agent that died stays listed as `gone`, with the time it was last
 seen. `pane_id` is the herdr pane, or the tmux session id (`$3`).
 
@@ -89,7 +100,7 @@ def _hook_fast_path():
             # every tool call, so it only matters when it ends a `blocked`.
             with open(os.path.join(adir, "agent.json")) as f:
                 entry = f.read()
-            work = '"backend": "tmux"' in entry and (
+            work = '"backend": "tmux"' in entry and '"harness": "sdk"' not in entry and (
                 event != "PostToolUse" or '"status": "blocked"' in entry)
         if not work:
             sys.exit(0)
@@ -118,7 +129,7 @@ import time  # noqa: E402
 import uuid  # noqa: E402
 from datetime import datetime  # noqa: E402
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 # Peers on other machines must speak the same protocol (see `roster rpc`).
 PROTOCOL = 1
 
@@ -252,6 +263,53 @@ def all_entries():
 
 def backend(entry):
     return entry.get("backend") or "herdr"
+
+
+def is_sdk(entry):
+    """A tmux agent whose session runs roster's Agent SDK runner, not Claude Code."""
+    return entry.get("harness") == "sdk"
+
+
+HARNESSES = ("sdk", "claude")
+
+
+def control_path(session_id):
+    """An SDK agent's control socket; the runner (brain/roster_brain/runner.py) binds the same path."""
+    base = os.environ.get("XDG_RUNTIME_DIR") or os.path.join(tempfile.gettempdir(), "roster-%d" % os.getuid())
+    return os.path.join(base, "roster", session_id + ".sock")
+
+
+def control(e, op, wait=0, timeout=30, **data):
+    """One request to an SDK agent's runner; returns its answer. `wait` seconds
+    to keep trying while the runner is still starting."""
+    req = (json.dumps(dict(data, op=op)) + "\n").encode()
+    deadline = time.time() + wait
+    while True:
+        try:
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(timeout)
+                sock.connect(control_path(e["session_id"]))
+                sock.sendall(req)
+                buf = b""
+                while not buf.endswith(b"\n"):
+                    chunk = sock.recv(65536)
+                    if not chunk:
+                        break
+                    buf += chunk
+            break
+        except (FileNotFoundError, ConnectionRefusedError):
+            if time.time() >= deadline:
+                raise Fail("%s's runner does not answer (starting, or not running)" % e["name"])
+            time.sleep(0.5)
+        except OSError as exc:
+            raise Fail("%s's runner: %s" % (e["name"], exc))
+    try:
+        out = json.loads(buf)
+    except ValueError:
+        raise Fail("%s's runner gave no answer" % e["name"])
+    if "error" in out:
+        raise Fail("%s: %s" % (e["name"], out["error"]))
+    return out
 
 
 def index_session(session_id, name):
@@ -684,12 +742,14 @@ def trust_folder(cwd):
         time.sleep(0.2)
 
 
-def start_session(name, cwd, claude_args):
-    """A detached tmux session running claude in cwd; returns its session id."""
+def start_session(name, cwd, claude_args, raw=False):
+    """A detached tmux session running claude in cwd (or, raw, that argv as it
+    is); returns its session id."""
     ensure_server()
     trust_folder(cwd)
+    argv = claude_args if raw else agent_argv(claude_args)
     pane = tmux("new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "-c", cwd,
-                *agent_env(), *agent_argv(claude_args)).split()[0]
+                *agent_env(), *argv).split()[0]
     tmux("set-option", "-t", pane, "@roster", name)
     return pane
 
@@ -729,6 +789,8 @@ def user_is_on(e, a):
     """True when the user may be typing into this agent right now."""
     if backend(e) == "herdr":
         return bool(a.get("focused"))
+    if is_sdk(e):
+        return False  # prompts are queued by its runner, never typed into its input
     if not a.get("attached"):
         return False
     # With focus-events on, tmux marks the client whose terminal has focus. That
@@ -745,6 +807,9 @@ def submit(e, text):
     """Type a prompt into an agent and press Enter."""
     if backend(e) == "herdr":
         herdr("agent", "prompt", e["pane_id"], text)
+        return
+    if is_sdk(e):
+        control(e, "prompt", wait=10, text=text, source="roster")
         return
     tmux("send-keys", "-t", e["pane_id"], "-l", text)
     time.sleep(0.1)  # let the TUI take the text as typing, not as part of a paste
@@ -812,7 +877,7 @@ def reconcile():
                 save(e)
                 continue
             matched[e["name"]] = s
-            if e.get("status") == "unknown":
+            if e.get("status") == "unknown" and not is_sdk(e):
                 # Before its first hook runs, a new Claude may be stuck asking
                 # whether to trust the folder; nothing reports that but the screen.
                 try:
@@ -962,6 +1027,9 @@ def cmd_rename(args):
         note = tag_session(e["pane_id"], new)
     else:
         note = set_herdr_name(e["pane_id"], new)
+    if is_sdk(e):
+        print("renamed %s -> %s%s%s" % (old, new, note, kept))
+        return
     spawn_retitle(e["session_id"])
     print("renamed %s -> %s%s; Claude's session name follows once it is idle%s" % (old, new, note, kept))
 
@@ -1103,7 +1171,10 @@ def render_list(rows, color=False, width=None):
         else:
             place = [labels.get(e.get("workspace_id")) or e.get("workspace_id") or "-",
                      "pane %s" % e.get("pane_id")]
-        where = " · ".join(place + [e.get("harness") or "-", short_path(e.get("cwd"))])
+        harness = e.get("harness") or "-"
+        if is_sdk(e) and (e.get("model") or e.get("effort")):
+            harness += " " + "/".join(x for x in (e.get("model"), e.get("effort")) if x)
+        where = " · ".join(place + [harness, short_path(e.get("cwd"))])
         lines.append(indent + paint("2", clip(where, (width or 0) - len(indent))))
         for sa in e.get("subagents") or []:
             done = sa.get("status") == "done"
@@ -1413,7 +1484,8 @@ def cmd_new(args):
             check_free(check_name(args.name))
         got = rpc(args.on, "new", data={"cwd": args.cwd, "name": args.name, "role": args.role,
                                         "prompt": prompt, "model": args.model, "effort": args.effort,
-                                        "temp": args.temp, "mkdir": getattr(args, "mkdir", False)})
+                                        "temp": args.temp, "mkdir": getattr(args, "mkdir", False),
+                                        "harness": args.harness})
         if args.json:
             print(json.dumps({"agent": "%s@%s" % (got["name"], args.on), "name": got["name"],
                               "machine": args.on, "cwd": got["cwd"], "plan": plan}))
@@ -1430,7 +1502,7 @@ def cmd_new(args):
     if args.temp and args.no_attach:
         raise Fail("--temp ends with its window, so it needs one")
     entry = new_agent(args.cwd, args.name, args.role, prompt, args.model, args.effort, args.temp,
-                      mkdir=getattr(args, "mkdir", False))
+                      mkdir=getattr(args, "mkdir", False), harness=args.harness)
     if args.json:
         print(json.dumps({"agent": "%s@%s" % (entry["name"], machine()), "name": entry["name"],
                           "machine": machine(), "cwd": short_path(entry["cwd"]), "plan": plan}))
@@ -1539,8 +1611,29 @@ def plan_brief(brief):
     return plan
 
 
-def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False, mkdir=False):
-    """Start a Claude agent in a roster tmux session on this machine; return its entry."""
+def runner_argv(session_id):
+    """How an SDK agent's runner starts: like Claude, through the interactive
+    shell when config.toml says `shell = true`, so its tools get the same PATH."""
+    exe = os.environ.get("ROSTER_BRAIN") or os.path.join(HOME_BIN, "roster-brain")  # override for tests only
+    if not os.access(exe, os.X_OK):
+        raise Fail("roster-brain is not installed here (`roster install` sets it up); "
+                   "or start a Claude Code agent with --harness claude")
+    argv = [exe, "agent", session_id]
+    if config().get("shell"):
+        shell = pwd.getpwuid(os.getuid()).pw_shell or "/bin/sh"
+        return [shell, "-ic", "exec " + " ".join(shlex.quote(a) for a in argv)]
+    return argv
+
+
+def new_harness(harness=None):
+    harness = harness or config().get("harness") or "sdk"
+    if harness not in HARNESSES:
+        raise Fail("harness is one of %s" % ", ".join(HARNESSES))
+    return harness
+
+
+def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False, mkdir=False, harness=None):
+    """Start an agent in a roster tmux session on this machine; return its entry."""
     cwd = os.path.realpath(os.path.expanduser(cwd or os.getcwd()))
     if not os.path.isdir(cwd):
         home = os.path.realpath(os.path.expanduser("~"))
@@ -1558,27 +1651,51 @@ def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False, mkdi
     else:
         name = fresh_id()
     session_id = str(uuid.uuid4())
-    claude_args = ["--session-id", session_id, "--name", name] + model_args(model, effort)
-    if prompt and prompt.strip():
-        claude_args.append(prompt)  # claude takes it as the first prompt, typed by the user
-    pane = start_session(name, cwd, claude_args)
+    harness = new_harness(harness)
+    model_args(model, effort)  # checked before anything starts
+    if harness == "sdk":
+        # The runner reads its entry when it starts, so the entry comes first,
+        # and its first prompt waits in a file it takes on start.
+        argv = runner_argv(session_id)
+        ensure_maildir(name)
+        if prompt and prompt.strip():
+            write_atomic(os.path.join(agent_dir(name), "first-prompt"), prompt)
+        pane = None
+    else:
+        claude_args = ["--session-id", session_id, "--name", name] + model_args(model, effort)
+        if prompt and prompt.strip():
+            claude_args.append(prompt)  # claude takes it as the first prompt, typed by the user
+        pane = start_session(name, cwd, claude_args)
+    entry = new_entry(name, role, harness, session_id, pane, cwd, model, effort, temp, scratch)
+    if harness == "sdk":
+        save(entry)
+        index_session(session_id, name)
+        pane = start_session(name, cwd, argv, raw=True)
+        entry = load(name) or entry
+        entry["pane_id"] = pane
     if temp:
         # Ends when its window closes. Armed on attach: tmux would destroy a
         # session that is unattached from the start right away.
         tmux("set-hook", "-t", pane, "client-attached", "set-option destroy-unattached on")
     ensure_maildir(name)
+    save(entry)
+    index_session(session_id, name)
+    return entry
+
+
+def new_entry(name, role, harness, session_id, pane, cwd, model, effort, temp, scratch):
     entry = {
         "name": name,
         "role": role or SCRATCH_ROLE,
         "backend": "tmux",
-        "harness": "claude",
+        "harness": harness,
         "session_id": session_id,
         "pane_id": pane,
         "workspace_id": None,
         "tab_id": None,
         "cwd": cwd,
         "joined_at": now(),
-        "status": "unknown",  # starting; SessionStart makes it idle
+        "status": "unknown",  # starting; SessionStart (or the runner) makes it idle
         "status_at": now(),
         "ended_at": None,
         "end_reason": None,
@@ -1592,8 +1709,6 @@ def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False, mkdi
         entry["temp"] = True
     if scratch:
         entry["scratch"] = True
-    save(entry)
-    index_session(session_id, name)
     return entry
 
 
@@ -1819,6 +1934,20 @@ def resume_in_tmux(e, model=None, effort=None):
         e["model"] = model
     if effort:
         e["effort"] = effort
+    model_args(e.get("model"), e.get("effort"))
+    if is_sdk(e):
+        # The runner reads its entry on start: write it first, then only add the session.
+        argv = runner_argv(e["session_id"])
+        e.update(backend="tmux", pane_id=None, workspace_id=None, tab_id=None, cwd=cwd,
+                 status="unknown", status_at=now(), ended_at=None, end_reason=None)
+        save(e)
+        index_session(e["session_id"], e["name"])
+        pane = start_session(e["name"], cwd, argv, raw=True)
+        cur = load(e["name"]) or e
+        cur["pane_id"] = pane
+        save(cur)
+        e.update(cur)
+        return pane
     pane = start_session(e["name"], cwd, ["--resume", e["session_id"], "--name", e["name"]]
                          + model_args(e.get("model"), e.get("effort")))
     e.update(backend="tmux", pane_id=pane, workspace_id=None, tab_id=None, cwd=cwd,
@@ -1830,6 +1959,8 @@ def resume_in_tmux(e, model=None, effort=None):
 
 def screen(e, lines=60):
     """The visible screen of an agent, with its SGR codes."""
+    if is_sdk(e):
+        return control(e, "screen")["text"]
     if backend(e) == "tmux":
         return tmux("capture-pane", "-p", "-e", "-t", e["pane_id"])
     return run([tool("herdr"), "agent", "read", e["pane_id"], "--source", "visible",
@@ -1841,7 +1972,13 @@ def prompt_is_empty(e):
 
     The input line is the last `❯` line on screen. Claude draws its suggested
     next prompt there too, dimmed (SGR 2); that is not text anyone typed.
+    An SDK agent's runner says itself whether its input holds text.
     """
+    if is_sdk(e):
+        try:
+            return not control(e, "status", timeout=5)["input"]
+        except Fail:
+            return False
     for line in reversed(screen(e).splitlines()):
         if "❯" in line:
             typed = re.sub(r"\x1b\[2m.*?(\x1b\[0m|$)", "", line)
@@ -1903,6 +2040,10 @@ def cmd_revive(args):
         e = load(check_name(args.name))
         if not e or backend(e) != "tmux" or e.get("status") in ENDED:
             raise Fail("%s is not a live tmux agent here" % args.name)
+        if is_sdk(e):
+            submit(e, "[roster] Your last turn ended on an API error. Carry on where you left off.")
+            print("prompted %s to carry on" % e["name"])
+            return
         if not e.get("stalled"):
             e["stalled"] = {"error": "unknown", "at": now(), "message": "marked by hand"}
             save(e)
@@ -2113,7 +2254,8 @@ def move_to(name, mach):
             pass
     e = load(name) or e
     payload = {"name": name, "role": e.get("role"), "session_id": e["session_id"], "cwd": e["cwd"],
-               "model": e.get("model"), "effort": e.get("effort"), "project": os.path.basename(pdir),
+               "model": e.get("model"), "effort": e.get("effort"), "harness": e.get("harness") or "claude",
+               "project": os.path.basename(pdir),
                "tar": base64.b64encode(buf.getvalue()).decode(), "mail": mail, "machine": machine()}
     try:
         rpc(mach, "adopt", data=payload, timeout=300)
@@ -2162,7 +2304,8 @@ def adopt(p, check_only=False):
                 shutil.copy2(src, dst)
     if old:
         unindex_session(old.get("session_id"))
-    e = {"name": name, "role": p.get("role"), "backend": "tmux", "harness": "claude",
+    e = {"name": name, "role": p.get("role"), "backend": "tmux",
+         "harness": p.get("harness") if p.get("harness") in HARNESSES else "claude",
          "session_id": p["session_id"], "pane_id": None, "workspace_id": None, "tab_id": None,
          "cwd": cwd, "joined_at": now(), "status": "gone", "status_at": now(),
          "ended_at": now(), "end_reason": "moved"}
@@ -2606,6 +2749,10 @@ def view_local(verb, name, args, data=None):
         msgs, nxt = read_transcript(e["session_id"], args.get("after"), args.get("limit", 200), args.get("before"))
         return {"agent": agent, "session_id": e["session_id"], "messages": msgs, "next": nxt}
     e, a = live_tmux(name)
+    if is_sdk(e):
+        return view_sdk(verb, e, agent, args, data)
+    if verb in SDK_VERBS:
+        raise Fail("%s runs Claude Code; %s works on SDK agents only" % (name, verb))
     if verb == "screen":
         text, dialog = read_screen(e)
         return {"agent": agent, "status": e.get("status"), "text": text, "dialog": dialog}
@@ -2650,6 +2797,36 @@ def view_local(verb, name, args, data=None):
     raise Fail("unknown view %s" % verb)
 
 
+SDK_VERBS = ("interrupt", "model", "effort")
+
+
+def view_sdk(verb, e, agent, args, data):
+    """The views of an SDK agent: straight to its runner."""
+    if verb == "screen":
+        got = control(e, "screen", wait=5)
+        return {"agent": agent, "status": got.get("status") or e.get("status"), "text": got["text"],
+                "dialog": got.get("dialog")}
+    if verb == "prompt":
+        text = (data or {}).get("text") or ""
+        if not text.strip():
+            raise Fail("empty prompt")
+        got = control(e, "prompt", wait=10, text=text, source="user")
+        return {"ok": True, "queued": got.get("queued", False)}
+    if verb == "answer":
+        control(e, "answer", key=str(args.get("key")), text=(data or {}).get("text"))
+        return {"ok": True}
+    if verb == "keys":
+        control(e, "keys", keys=list(args.get("keys") or []))
+        return {"ok": True}
+    if verb == "interrupt":
+        return {"ok": True, "interrupted": control(e, "interrupt")["ok"]}
+    if verb == "model":
+        return {"ok": True, "model": control(e, "model", model=(data or {}).get("model"))["model"]}
+    if verb == "effort":
+        return {"ok": True, "effort": control(e, "effort", effort=(data or {}).get("effort"))["effort"]}
+    raise Fail("unknown view %s" % verb)
+
+
 def view(verb, target, args, data=None):
     """Run a view on whichever machine the agent is on."""
     name, mach = split_target(target)
@@ -2687,6 +2864,11 @@ def cmd_view(args):
             raise Fail("option is the number of the dialog's free-text option")
         opts = {"key": args.option}
         data = {"text": sys.stdin.read() if args.text in (None, "-") else args.text}
+    elif verb == "model":
+        model_args(args.model, None)
+        data = {"model": args.model}
+    elif verb == "effort":
+        data = {"effort": args.effort}
     out = view(verb, args.agent, opts, data)
     if getattr(args, "json", False):
         print(json.dumps(out))
@@ -2700,6 +2882,10 @@ def cmd_view(args):
             print("dialog: %s" % out["dialog"]["title"])
             for o in out["dialog"]["options"]:
                 print("  %s. %s" % (o["key"], o["label"]))
+    elif verb == "interrupt":
+        print("interrupted" if out.get("interrupted") else "nothing to interrupt")
+    elif verb in ("model", "effort"):
+        print("%s: %s" % (verb, out.get(verb)))
     else:
         print("ok")
 
@@ -2749,7 +2935,8 @@ def cmd_rpc(args):
         elif verb == "new":
             p = json.load(sys.stdin)
             e = new_agent(p.get("cwd") or "~", p.get("name"), p.get("role"), p.get("prompt"),
-                          p.get("model"), p.get("effort"), bool(p.get("temp")), mkdir=bool(p.get("mkdir")))
+                          p.get("model"), p.get("effort"), bool(p.get("temp")), mkdir=bool(p.get("mkdir")),
+                          harness=p.get("harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
         elif verb == "resume":
             reconcile()
@@ -2767,7 +2954,7 @@ def cmd_rpc(args):
             out = {"name": kill_local(check_name(rest[0]))}
         elif verb == "events":
             return cmd_events(argparse.Namespace(machine=None, all=False))
-        elif verb in ("transcript", "screen", "prompt", "keys", "answer"):
+        elif verb in ("transcript", "screen", "prompt", "keys", "answer") + SDK_VERBS:
             name, opts, data = check_name(rest[0]), {}, None
             if verb == "transcript":
                 for flag, key in (("--after", "after"), ("--before", "before"), ("--limit", "limit")):
@@ -2775,7 +2962,7 @@ def cmd_rpc(args):
                         opts[key] = int(rest[rest.index(flag) + 1])
             elif verb == "keys":
                 opts["keys"] = rest[1:]
-            elif verb in ("prompt", "answer"):
+            elif verb in ("prompt", "answer", "model", "effort"):
                 data = json.load(sys.stdin)
                 if verb == "answer":
                     opts["key"] = rest[1]
@@ -3212,11 +3399,16 @@ def cmd_install(args):
     if args.hub:
         run(["systemctl", "--user", "enable", "roster-hub.service"])
         run(["systemctl", "--user", "restart", "roster-hub.service"])
-    if args.brain:
-        got = run([os.path.join(HOME_BIN, "roster-brain"), "setup"], timeout=600)
-        print((got.stdout + got.stderr).strip())
-        if got.returncode:
+    # The Agent SDK venv, which SDK agents (the default for new ones) and the
+    # brain both run in. A machine without it still runs Claude Code agents.
+    exe = os.path.join(HOME_BIN, "roster-brain")
+    got = run([exe, "setup"], timeout=600) if os.access(exe, os.X_OK) else None
+    if got is None or got.returncode:
+        print("note: no Agent SDK venv here (%s); new agents need --harness claude until it is set up" % (
+            ((got.stdout + got.stderr).strip()[-300:] if got else "roster-brain not installed")))
+        if args.brain:
             raise Fail("roster-brain setup failed")
+    if args.brain:
         run(["systemctl", "--user", "enable", "roster-brain.service"])
         run(["systemctl", "--user", "restart", "roster-brain.service"])
     if tmux_running():
@@ -3264,7 +3456,7 @@ def relink(session_id, source):
         return None
     if e.get("status") == "gone":
         e.update(status="idle", status_at=now(), ended_at=None, end_reason=None)
-    elif kind == "tmux" and source != "compact":
+    elif kind == "tmux" and source != "compact" and not is_sdk(e):
         e.update(status="idle", status_at=now())
     if pane:
         if kind == "tmux" and (backend(e) != "tmux" or e.get("pane_id") != pane):
@@ -3363,8 +3555,8 @@ def subagents_of(name):
 def hook_status(name, session_id, event, data, stop_blocked):
     """tmux agents: record the status the hook event implies. herdr agents get theirs from herdr."""
     e = load(name)
-    if not e or backend(e) != "tmux" or e.get("session_id") != session_id or e.get("status") in ENDED:
-        return
+    if not e or backend(e) != "tmux" or is_sdk(e) or e.get("session_id") != session_id or e.get("status") in ENDED:
+        return  # an SDK agent's runner writes its own status
     cur, new = e.get("status"), None
     stalled = e.get("stalled")
     if event == "UserPromptSubmit":
@@ -3496,7 +3688,7 @@ def main():
     s.add_argument("--peek", action="store_true", help="leave it unread")
     s.set_defaults(fn=cmd_inbox)
 
-    s = sub.add_parser("new", help="start a Claude agent in its own tmux session; attach here, or in a new window")
+    s = sub.add_parser("new", help="start an agent in its own tmux session; attach here, or in a new window")
     s.add_argument("cwd", nargs="?", help="working directory (default: here, or home on another machine)")
     s.add_argument("--on", metavar="MACHINE", help="start it on a peer machine")
     s.add_argument("--name", help="roster name (default: a random placeholder the agent renames)")
@@ -3507,6 +3699,9 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="with --brief: only show what would be chosen")
     s.add_argument("--model", help="Claude model: an alias (opus, sonnet, fable) or a full name")
     s.add_argument("--effort", choices=EFFORTS, help="Claude effort level")
+    s.add_argument("--harness", choices=HARNESSES,
+                   help="sdk (roster's Agent SDK runner) or claude (Claude Code's TUI); default sdk, "
+                        "or `harness` in config.toml")
     s.add_argument("--temp", action="store_true",
                    help="a quick session: it ends and leaves the roster when its window closes")
     s.add_argument("--json", action="store_true", help="say what started as JSON")
@@ -3580,6 +3775,23 @@ def main():
     s = sub.add_parser("keys", help="send keys to an agent, to answer a dialog")
     s.add_argument("agent")
     s.add_argument("keys", nargs="+", help="Up Down Left Right Enter Escape Tab BSpace 0-9 y n")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("interrupt", help="stop an SDK agent's turn in progress")
+    s.add_argument("agent")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("model", help="switch an SDK agent's model, live")
+    s.add_argument("agent")
+    s.add_argument("model", help="an alias (opus, sonnet, haiku, fable) or a full name")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("effort", help="switch an SDK agent's effort level, live")
+    s.add_argument("agent")
+    s.add_argument("effort", choices=EFFORTS)
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_view)
 

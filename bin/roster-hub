@@ -737,6 +737,9 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ("POST", "/v1/new"): ("new", True),
         ("POST", "/v1/resume"): ("resume", True),
         ("POST", "/v1/kill"): ("kill", True),
+        ("POST", "/v1/interrupt"): ("interrupt", True),
+        ("POST", "/v1/model"): ("model", True),
+        ("POST", "/v1/effort"): ("effort", True),
         ("POST", "/v1/push"): ("push", True),
         ("GET", "/v1/devices"): ("devices", True),
         ("DELETE", "/v1/devices/*"): ("delete_device", True),
@@ -1021,6 +1024,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
             if effort not in EFFORTS:
                 raise HttpError(400, "effort is one of %s" % ", ".join(EFFORTS))
             args.append("--effort=" + effort)
+        harness = b.get("harness")
+        if harness is not None:
+            if harness not in ("sdk", "claude"):
+                raise HttpError(400, "harness is sdk or claude")
+            args.append("--harness=" + harness)
         args.append("--json")
         cwd = check_text(b.get("cwd"), "cwd", 4096, oneline=True) or None
         if cwd is not None:
@@ -1040,6 +1048,30 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cli("kill", check_agent(self.body.get("agent")), timeout=30)
         self.hub.wake.set()
         return {"ok": True}
+
+    # SDK agents only (harness "sdk"); roster refuses these for Claude Code agents.
+    def r_interrupt(self):
+        out = cli("interrupt", check_agent(self.body.get("agent")), "--json", timeout=20, as_json=True)
+        self.hub.wake.set()
+        return {"ok": True, "interrupted": bool((out or {}).get("interrupted"))}
+
+    def r_model(self):
+        agent = check_agent(self.body.get("agent"))
+        model = check_text(self.body.get("model"), "model", 100, oneline=True, required=True)
+        if not re.fullmatch(r"[A-Za-z0-9._\[\]-]+", model):
+            raise HttpError(400, "bad model name")
+        cli("model", agent, model, timeout=20)
+        self.hub.wake.set()
+        return {"ok": True, "model": model}
+
+    def r_effort(self):
+        agent = check_agent(self.body.get("agent"))
+        effort = self.body.get("effort")
+        if effort not in EFFORTS:
+            raise HttpError(400, "effort is one of %s" % ", ".join(EFFORTS))
+        cli("effort", agent, effort, timeout=20)
+        self.hub.wake.set()
+        return {"ok": True, "effort": effort}
 
     def r_push(self):
         if "endpoint" not in self.body:

@@ -24,6 +24,10 @@ roster kill | resume | rename | cleanup                # see roster -h
 
 Agents use the `roster` skill to join, rename themselves, and message each other. `roster-tray` (a StatusNotifierItem menu) and `roster-pick` (a fuzzel menu for a keybinding) are front ends on the CLI.
 
+## SDK agents
+
+New agents run on roster's own harness on the Claude Agent SDK (`harness` `sdk` in `roster list`), next to existing Claude Code agents, which keep running as they are. An SDK agent is still a tmux agent with the same tools, hooks, mail and commands, but roster drives it natively instead of through its screen: prompts are queued, `roster interrupt` stops a turn, `roster model` and `roster effort` switch live, permission prompts and questions are structured dialogs, and API errors are retried by the agent itself. `roster new --harness claude` (or `harness = "claude"` in config.toml) starts a Claude Code agent instead. Details in [docs/sdk-agents.md](docs/sdk-agents.md).
+
 ## Folder trust
 
 Starting an agent in a folder counts as trusting it: `roster new` and `roster resume` record Claude Code's folder trust for it (in `~/.claude.json`, keyed like Claude does: the repository root, or the folder itself), so a new agent does not stop at "Do you trust this folder?". Set `trust = false` in `~/.config/roster/config.toml` to keep Claude's question instead.
