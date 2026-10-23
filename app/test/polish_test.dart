@@ -269,4 +269,41 @@ void main() {
     await hub.events.close();
     await tester.pump();
   });
+
+  testWidgets('right click on another row keeps the open agent beside the list intact', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) => {'agent': q['agent'], 'session_id': 's', 'messages': [
+            {'i': 1, 'at': '2026-10-20T10:00:00+0200', 'role': 'user', 'text': 'hello there'},
+          ], 'next': 2},
+      'GET /v1/screen': (_, q) => {'agent': q['agent'], 'status': 'idle', 'text': '', 'dialog': null},
+    });
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({'agents': [row('alpha', 'srv', 'idle'), row('beta', 'srv', 'idle')], 'machines': machines});
+    await tester.pump();
+    await tester.pumpAndSettle();
+    openAgent('alpha@srv');
+    await tester.pumpAndSettle();
+    expect(find.text('hello there'), findsOneWidget);
+
+    await tester.tap(find.textContaining('beta').first, buttons: kSecondaryButton);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('Park'), findsOneWidget);
+    expect(find.text('hello there'), findsOneWidget);
+    await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+    await tester.pumpAndSettle();
+    expect(tester.takeException(), isNull);
+    expect(find.text('hello there'), findsOneWidget);
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
 }
