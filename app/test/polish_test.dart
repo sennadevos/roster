@@ -1,5 +1,6 @@
 import 'dart:convert';
 
+import 'package:flutter/gestures.dart' show kSecondaryButton;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -208,5 +209,64 @@ void main() {
     await tester.tap(find.text('Back'));
     await tester.pump();
     expect(picked.last, ['Left']);
+  });
+
+  testWidgets('right click on a row: park or kill a live agent, start or kill a parked one', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final calls = <String>[];
+    final hub = FakeHub({
+      'POST /v1/park': (b, _) { calls.add('park ${b['agent']}'); return {'ok': true}; },
+      'POST /v1/resume': (b, _) { calls.add('resume ${b['agent']}'); return {'ok': true}; },
+      'POST /v1/kill': (b, _) { calls.add('kill ${b['agent']}'); return {'ok': true}; },
+    });
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({
+      'agents': [row('alpha', 'srv', 'idle'), row('beta', 'srv', 'parked')],
+      'machines': machines,
+    });
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    Future<void> rightClick(String name) async {
+      await tester.tap(find.textContaining(name).first, buttons: kSecondaryButton);
+      await tester.pumpAndSettle();
+    }
+
+    await rightClick('alpha');
+    expect(find.text('Park'), findsOneWidget);
+    expect(find.text('Kill…'), findsOneWidget);
+    expect(find.text('Start'), findsNothing);
+    await tester.tap(find.text('Park'));
+    await tester.pumpAndSettle();
+    expect(calls, ['park alpha@srv']);
+
+    // Parked agents sit in a folded section.
+    await tester.tap(find.text('Parked (1)'));
+    await tester.pumpAndSettle();
+    await rightClick('beta');
+    expect(find.text('Start'), findsOneWidget);
+    expect(find.text('Park'), findsNothing);
+    await tester.tap(find.text('Start'));
+    await tester.pumpAndSettle();
+    expect(calls.last, 'resume beta@srv');
+
+    // Kill asks first.
+    await rightClick('beta');
+    await tester.tap(find.text('Kill…'));
+    await tester.pumpAndSettle();
+    expect(find.text('Kill beta?'), findsOneWidget);
+    await tester.tap(find.widgetWithText(FilledButton, 'Kill'));
+    await tester.pumpAndSettle();
+    expect(calls.last, 'kill beta@srv');
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
   });
 }

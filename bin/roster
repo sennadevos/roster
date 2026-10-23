@@ -1741,6 +1741,11 @@ def kill_local(name):
     e, a = live_entry(name, matched)
     if backend(e) != "tmux":
         raise Fail("%s runs in herdr; end it there" % e["name"])
+    if e.get("status") == PARKED:
+        # No process to stop: it just stops waiting to be resumed.
+        e.update(status="gone", ended_at=now(), end_reason="killed")
+        save(e)
+        return e["name"]
     if a is None:
         raise Fail("%s is already %s" % (e["name"], e.get("status")))
     try:
@@ -1832,12 +1837,24 @@ def cmd_park(args):
             if since < cutoff:
                 names.append(e["name"])
     else:
-        names = [check_name(n) for n in args.names]
+        names = list(args.names)
     if not names and args.idle_for is None:
         raise Fail("park needs agent names, or --idle-for HOURS")
-    for name in names:
-        why = park(name)
-        print("parked %s" % name if why is None else "kept %s: %s" % (name, why))
+    kept = []
+    for target in names:
+        name, mach = split_target(target)
+        check_name(name)
+        if mach and mach != machine():
+            why = rpc(mach, "park", name).get("kept")
+        else:
+            why = park(name)
+        if why is not None:
+            kept.append("%s: %s" % (target, why))
+        if why is None or len(names) > 1 or args.idle_for is not None:
+            print("parked %s" % target if why is None else "kept %s" % kept[-1])
+    if kept and args.idle_for is None:
+        # Asked for by name: say why it did not happen, as an error.
+        raise Fail("not parked: %s" % kept[0] if len(names) == 1 else "%d of %d not parked" % (len(kept), len(names)))
 
 
 def cmd_pin(args):
@@ -2952,6 +2969,8 @@ def cmd_rpc(args):
             out = adopt(json.load(sys.stdin), check_only=verb == "adopt-check")
         elif verb == "kill":
             out = {"name": kill_local(check_name(rest[0]))}
+        elif verb == "park":
+            out = {"kept": park(check_name(rest[0]))}
         elif verb == "events":
             return cmd_events(argparse.Namespace(machine=None, all=False))
         elif verb in ("transcript", "screen", "prompt", "keys", "answer") + SDK_VERBS:

@@ -737,6 +737,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ("POST", "/v1/new"): ("new", True),
         ("POST", "/v1/resume"): ("resume", True),
         ("POST", "/v1/kill"): ("kill", True),
+        ("POST", "/v1/park"): ("park", True),
         ("POST", "/v1/interrupt"): ("interrupt", True),
         ("POST", "/v1/model"): ("model", True),
         ("POST", "/v1/effort"): ("effort", True),
@@ -1041,6 +1042,11 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def r_resume(self):
         cli("resume", check_agent(self.body.get("agent")), "--no-attach", timeout=90)
+        self.hub.wake.set()
+        return {"ok": True}
+
+    def r_park(self):
+        cli("park", check_agent(self.body.get("agent")), timeout=30)
         self.hub.wake.set()
         return {"ok": True}
 

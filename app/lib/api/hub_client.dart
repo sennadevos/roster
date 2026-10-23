@@ -165,6 +165,9 @@ class HubClient {
 
   Future<void> kill(String agent) => _send('POST', '/v1/kill', body: {'agent': agent});
 
+  /// Stops an idle agent's process; it stays on the roster and starts again when used.
+  Future<void> park(String agent) => _send('POST', '/v1/park', body: {'agent': agent});
+
   /// The UnifiedPush endpoint the hub posts to, or null to stop pushes.
   Future<void> setPush(String? endpoint) => _send('POST', '/v1/push', body: {'endpoint': endpoint});
 

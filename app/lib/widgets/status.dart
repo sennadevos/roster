@@ -241,6 +241,28 @@ String friendlyError(Object error) {
   return '$error';
 }
 
+/// Asks before killing an agent; a parked one only stops waiting to be resumed.
+Future<bool> confirmKill(BuildContext context, String name, {bool parked = false}) async {
+  final ok = await showDialog<bool>(
+    context: context,
+    builder: (c) => AlertDialog(
+      title: Text('Kill $name?'),
+      content: Text(parked
+          ? 'It stops waiting to be resumed and shows as gone. The conversation stays in the transcript, and Resume brings it back.'
+          : 'Its Claude session ends. The conversation stays in the transcript, and Resume brings it back.'),
+      actions: [
+        TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
+        FilledButton(
+          style: FilledButton.styleFrom(backgroundColor: statusColors(c).blocked),
+          onPressed: () => Navigator.pop(c, true),
+          child: const Text('Kill'),
+        ),
+      ],
+    ),
+  );
+  return ok == true;
+}
+
 /// Shows an error (or a short notice) as a toast, with an optional action.
 void showError(BuildContext context, Object error, {String? action, VoidCallback? onAction}) {
   final messenger = ScaffoldMessenger.maybeOf(context);

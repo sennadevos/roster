@@ -224,22 +224,8 @@ class _AgentScreenState extends State<AgentScreen> {
           await client.resume(widget.agent);
           if (mounted) showError(context, 'Resuming ${row?.name ?? widget.agent}…');
         case 'kill':
-          final ok = await showDialog<bool>(
-            context: context,
-            builder: (c) => AlertDialog(
-              title: Text('Kill ${row?.name ?? widget.agent}?'),
-              content: const Text('Its Claude session ends. The conversation stays in the transcript, and Resume brings it back.'),
-              actions: [
-                TextButton(onPressed: () => Navigator.pop(c, false), child: const Text('Cancel')),
-                FilledButton(
-                  style: FilledButton.styleFrom(backgroundColor: statusColors(c).blocked),
-                  onPressed: () => Navigator.pop(c, true),
-                  child: const Text('Kill'),
-                ),
-              ],
-            ),
-          );
-          if (ok == true) {
+          final ok = await confirmKill(context, row?.name ?? widget.agent, parked: row?.parked ?? false);
+          if (ok) {
             await client.kill(widget.agent);
             if (mounted) showError(context, 'Killed ${row?.name ?? widget.agent}');
           }

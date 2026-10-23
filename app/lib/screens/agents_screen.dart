@@ -707,7 +707,7 @@ class AgentTile extends StatelessWidget {
       height: 1.3,
     );
     final subs = a.ended ? const <Subagent>[] : a.subagents;
-    return Semantics(
+    final tile = Semantics(
       selected: selected,
       button: true,
       child: Padding(
@@ -721,6 +721,12 @@ class AgentTile extends StatelessWidget {
           clipBehavior: Clip.antiAlias,
           child: InkWell(
             onTap: () => openAgent(a.id),
+            // Right click (or a long press on a phone): park, start or kill it.
+            onSecondaryTapUp: (d) => showAgentMenu(context, a, d.globalPosition),
+            onLongPress: () {
+              final box = context.findRenderObject() as RenderBox?;
+              if (box != null) showAgentMenu(context, a, box.localToGlobal(box.size.center(Offset.zero)));
+            },
             child: Opacity(
               opacity: dim ? 0.55 : 1,
               child: Padding(
@@ -828,6 +834,48 @@ class AgentTile extends StatelessWidget {
         ),
       ),
     );
+    if (!kIsWeb) return tile;
+    // Over a row the right click is ours, not the browser's.
+    return MouseRegion(
+      onEnter: (_) => BrowserContextMenu.disableContextMenu(),
+      onExit: (_) => BrowserContextMenu.enableContextMenu(),
+      child: tile,
+    );
+  }
+}
+
+/// The row's menu. A live agent: Park, Kill. A parked one: Start, Kill. A gone one: Resume.
+Future<void> showAgentMenu(BuildContext context, Agent a, Offset at) async {
+  final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
+  final live = !a.ended && !a.parked;
+  final action = await showMenu<String>(
+    context: context,
+    position: RelativeRect.fromRect(Rect.fromPoints(at, at), Offset.zero & overlay.size),
+    items: [
+      if (live) const PopupMenuItem(value: 'park', child: Text('Park')),
+      if (a.parked) const PopupMenuItem(value: 'resume', child: Text('Start')),
+      if (a.status == 'gone') const PopupMenuItem(value: 'resume', child: Text('Resume')),
+      if (live || a.parked) const PopupMenuItem(value: 'kill', child: Text('Kill…')),
+    ],
+  );
+  if (action == null || !context.mounted) return;
+  final client = AppScope.read(context).client;
+  if (client == null) return;
+  try {
+    switch (action) {
+      case 'park':
+        await client.park(a.id);
+        if (context.mounted) showError(context, 'Parked ${a.name}');
+      case 'resume':
+        await client.resume(a.id);
+        if (context.mounted) showError(context, '${a.parked ? 'Starting' : 'Resuming'} ${a.name}…');
+      case 'kill':
+        if (!await confirmKill(context, a.name, parked: a.parked)) return;
+        await client.kill(a.id);
+        if (context.mounted) showError(context, 'Killed ${a.name}');
+    }
+  } catch (e) {
+    if (context.mounted) showError(context, e);
   }
 }
 
