@@ -4,6 +4,7 @@ brain/requirements.txt, then runs the brain in it. See docs/brain.md."""
 
 import hashlib
 import os
+import shutil
 import subprocess
 import sys
 
@@ -30,7 +31,11 @@ def setup(quiet=False):
         pass
     say = (lambda m: None) if quiet else (lambda m: print(m, file=sys.stderr))
     say("roster-brain: preparing %s" % VENV)
-    if not os.path.exists(os.path.join(VENV, "bin", "python")):
+    py = os.path.join(VENV, "bin", "python")
+    if os.path.exists(py) and subprocess.run([py, "-m", "pip", "--version"], capture_output=True).returncode:
+        # Left half made by a venv that failed (no ensurepip, e.g. Ubuntu without python3-venv).
+        shutil.rmtree(VENV)
+    if not os.path.exists(py):
         subprocess.run([sys.executable, "-m", "venv", VENV], check=True)
     subprocess.run([os.path.join(VENV, "bin", "python"), "-m", "pip", "install", "-q",
                     "--disable-pip-version-check", "-r", os.path.join(BRAIN, "requirements.txt")], check=True)
