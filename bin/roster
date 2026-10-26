@@ -2244,7 +2244,8 @@ def move(target, live):
 def move_to(name, mach):
     """Move an idle tmux agent to a peer: its conversation goes along and it
     resumes there under the same name, role, model and effort, with its unread
-    mail. Its folder must already exist there (moving the files is up to you).
+    mail. Its folder must already exist there (moving the files is up to you):
+    at the same path, or at the same place under that machine's home.
     If the peer fails to take it, it is resumed here again."""
     import base64
     import io
@@ -2258,7 +2259,8 @@ def move_to(name, mach):
     if user_is_on(e, a) or not prompt_is_empty(e):
         raise Fail("%s is in use (its window is focused, or its input holds text)" % name)
     peer(mach)
-    rpc(mach, "adopt-check", data={"name": name, "cwd": e["cwd"]})
+    home = os.path.realpath(os.path.expanduser("~"))
+    there = rpc(mach, "adopt-check", data={"name": name, "cwd": e["cwd"], "home": home}).get("cwd") or e["cwd"]
     tpath = transcript_path(e["session_id"])
     pdir = os.path.dirname(tpath)
     tmux("kill-session", "-t", e["pane_id"])
@@ -2276,7 +2278,7 @@ def move_to(name, mach):
         except (OSError, ValueError):
             pass
     e = load(name) or e
-    payload = {"name": name, "role": e.get("role"), "session_id": e["session_id"], "cwd": e["cwd"],
+    payload = {"name": name, "role": e.get("role"), "session_id": e["session_id"], "cwd": e["cwd"], "home": home,
                "model": e.get("model"), "effort": e.get("effort"), "harness": e.get("harness") or "claude",
                "project": os.path.basename(pdir),
                "tar": base64.b64encode(buf.getvalue()).decode(), "mail": mail, "machine": machine()}
@@ -2286,7 +2288,21 @@ def move_to(name, mach):
         resume_in_tmux(e)
         raise Fail("%s did not take it (%s); resumed here again" % (mach, exc))
     forget(e)
-    return "moved %s to %s@%s (%d KB of conversation, %d unread)" % (name, name, mach, len(buf.getvalue()) // 1024, len(mail))
+    return "moved %s to %s@%s in %s (%d KB of conversation, %d unread)" % (
+        name, name, mach, there, len(buf.getvalue()) // 1024, len(mail))
+
+
+def mapped_cwd(cwd, src_home):
+    """Where an agent's folder from another machine is here: the same path,
+    or, when that is not here but the folder sits in the other machine's
+    home, the same place in this machine's home (/var/home/sjdevos/Desktop/x
+    to /home/senna/Desktop/x)."""
+    if os.path.isdir(cwd) or not src_home:
+        return cwd
+    src_home = src_home.rstrip("/")
+    if cwd != src_home and not cwd.startswith(src_home + "/"):
+        return cwd
+    return os.path.realpath(os.path.expanduser("~")) + cwd[len(src_home):]
 
 
 def adopt(p, check_only=False):
@@ -2298,12 +2314,14 @@ def adopt(p, check_only=False):
     old = load(name)
     if old and old.get("status") not in ENDED:
         raise Fail("%s is already a live agent on %s" % (name, machine()))
-    cwd = p["cwd"]
+    cwd = mapped_cwd(p["cwd"], p.get("home"))
     if not os.path.isdir(cwd):
         raise Fail("%s does not exist on %s; move the folder first" % (cwd, machine()))
     if check_only:
-        return {"ok": True}
-    project = p["project"]
+        return {"ok": True, "cwd": cwd}
+    # Claude keys a session's folder by its working directory, so a session
+    # that lands in another place goes in that place's project folder.
+    project = p["project"] if cwd == p["cwd"] else re.sub(r"[^A-Za-z0-9]", "-", cwd)
     if not re.fullmatch(r"[A-Za-z0-9._-]+", project):
         raise Fail("bad project folder %r" % project)
     pdir = os.path.join(os.path.expanduser("~/.claude/projects"), project)
