@@ -165,6 +165,18 @@ class HubClient {
 
   Future<void> kill(String agent) => _send('POST', '/v1/kill', body: {'agent': agent});
 
+  /// SDK agents: stop the turn in progress; true when there was one.
+  Future<bool> interrupt(String agent) async =>
+      (await _send('POST', '/v1/interrupt', body: {'agent': agent}))['interrupted'] == true;
+
+  /// SDK agents: switch the model, live.
+  Future<void> setModel(String agent, String model) =>
+      _send('POST', '/v1/model', body: {'agent': agent, 'model': model});
+
+  /// SDK agents: switch the effort level, live.
+  Future<void> setEffort(String agent, String effort) =>
+      _send('POST', '/v1/effort', body: {'agent': agent, 'effort': effort});
+
   /// Stops an idle agent's process; it stays on the roster and starts again when used.
   Future<void> park(String agent) => _send('POST', '/v1/park', body: {'agent': agent});
 

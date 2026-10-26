@@ -91,6 +91,10 @@ class _AgentScreenState extends State<AgentScreen> {
   /// Hands-free voice chat with this agent, once the mic was tapped.
   VoiceSession? _voice;
 
+  /// While the agent works its row does not change, so nothing else says
+  /// there is more to read: look every few seconds.
+  Timer? _poll;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -111,6 +115,12 @@ class _AgentScreenState extends State<AgentScreen> {
     _conv.addListener(_onConv);
     _scroll.addListener(_onScroll);
     AgentScreen.focusRequest.addListener(_focusIn);
+    _poll = Timer.periodic(const Duration(seconds: 3), (_) {
+      final status = _app!.snapshot.byId(widget.agent)?.status;
+      if (status == 'working' || status == 'blocked' || _conv.messages.any((m) => m.queued)) {
+        unawaited(_conv.fetchNew());
+      }
+    });
   }
 
   @override
@@ -118,6 +128,7 @@ class _AgentScreenState extends State<AgentScreen> {
     _app?.removeListener(_onApp);
     _conv.removeListener(_onConv);
     _voice?.dispose();
+    _poll?.cancel();
     AgentScreen.focusRequest.removeListener(_focusIn);
     if (AppState.onScreen == widget.agent) AppState.onScreen = null;
     _scroll.dispose();
@@ -245,7 +256,23 @@ class _AgentScreenState extends State<AgentScreen> {
   Future<void> _menu(String action, Agent? row) async {
     final client = _app!.client!;
     try {
+      // SDK agents: model:<name> and effort:<level> switch live; model:? asks for a name.
+      if (action.startsWith('model:') || action.startsWith('effort:')) {
+        final (what, value) = (action.split(':').first, action.substring(action.indexOf(':') + 1));
+        final v = value == '?' ? await _askModel(row?.model) : value;
+        if (v == null || v.isEmpty) return;
+        if (what == 'model') {
+          await client.setModel(widget.agent, v);
+        } else {
+          await client.setEffort(widget.agent, v);
+        }
+        if (mounted) showError(context, '${what == 'model' ? 'Model' : 'Effort'}: $v');
+        return;
+      }
       switch (action) {
+        case 'interrupt':
+          final did = await client.interrupt(widget.agent);
+          if (mounted) showError(context, did ? 'Interrupted' : 'Nothing to interrupt');
         case 'refresh':
           await _conv.fetchNew();
           await _conv.fetchScreen();
@@ -265,6 +292,27 @@ class _AgentScreenState extends State<AgentScreen> {
     } catch (e) {
       if (mounted) showError(context, e);
     }
+  }
+
+  /// Any model name, for the one not in the list (a full model id, say).
+  Future<String?> _askModel(String? current) {
+    final field = TextEditingController(text: current ?? '');
+    return showDialog<String>(
+      context: context,
+      builder: (c) => AlertDialog(
+        title: const Text('Model'),
+        content: TextField(
+          controller: field,
+          autofocus: true,
+          decoration: const InputDecoration(hintText: 'an alias (opus) or a full model name'),
+          onSubmitted: (v) => Navigator.pop(c, v.trim()),
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(c), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(c, field.text.trim()), child: const Text('Switch')),
+        ],
+      ),
+    );
   }
 
   KeyEventResult _onKey(FocusNode node, KeyEvent e) {
@@ -550,6 +598,40 @@ class _JumpButton extends StatelessWidget {
 
 /// Name, status and how long, role; then machine, model, folder and the
 /// subagents it runs.
+/// A tag in the header strip that opens a menu of choices; the current one ticked.
+class _Picker extends StatelessWidget {
+  const _Picker(
+      {required this.label, required this.icon, required this.tooltip, required this.current, required this.choices,
+      required this.onPick, this.other});
+
+  final String label;
+  final IconData icon;
+  final String tooltip;
+  final String? current;
+  final List<String> choices;
+  final void Function(String) onPick;
+
+  /// A last entry that asks for a value of its own (picked as `?`).
+  final String? other;
+
+  @override
+  Widget build(BuildContext context) {
+    return PopupMenuButton<String>(
+      tooltip: tooltip,
+      onSelected: onPick,
+      itemBuilder: (_) => [
+        for (final c in choices)
+          CheckedPopupMenuItem(value: c, checked: c == current, child: Text(c)),
+        if (other != null) PopupMenuItem(value: '?', child: Text(other!)),
+      ],
+      child: Row(mainAxisSize: MainAxisSize.min, children: [
+        Tag(label, icon: icon),
+        const Icon(Icons.arrow_drop_down, size: 16),
+      ]),
+    );
+  }
+}
+
 class _Header extends StatelessWidget implements PreferredSizeWidget {
   const _Header({required this.agent, required this.row, required this.backButton, required this.onMenu});
 
@@ -575,6 +657,9 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
     final leaf = name.split('/').last;
     final color = sc.of(status);
     final ended = r?.ended ?? false;
+    // An SDK agent that runs (or is parked: switching resumes it) takes model,
+    // effort and interrupt from here.
+    final live = (r?.sdk ?? false) && !ended && r?.stale == null;
     final subs = ended ? const <Subagent>[] : (r?.subagents ?? const <Subagent>[]);
     return Material(
       color: cs.surface,
@@ -625,6 +710,12 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
                       tooltip: 'Refresh',
                       onPressed: () => onMenu('refresh'),
                     ),
+                  if (live && (status == 'working' || status == 'blocked'))
+                    IconButton(
+                      icon: const Icon(Icons.stop_circle_outlined),
+                      tooltip: 'Interrupt',
+                      onPressed: () => onMenu('interrupt'),
+                    ),
                   if (ended)
                     Padding(
                       padding: const EdgeInsets.only(left: 4),
@@ -640,6 +731,8 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
                     itemBuilder: (_) => [
                       if (!kIsWeb) const PopupMenuItem(value: 'refresh', child: Text('Refresh')),
                       const PopupMenuItem(value: 'copy', child: Text('Copy name@machine')),
+                      if (live) const PopupMenuItem(value: 'interrupt', child: Text('Interrupt')),
+                      if (live) const PopupMenuItem(value: 'model:?', child: Text('Switch model…')),
                       if (ended) const PopupMenuItem(value: 'resume', child: Text('Resume')),
                       if (!ended) const PopupMenuItem(value: 'kill', child: Text('Kill…')),
                     ],
@@ -657,7 +750,25 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
                   children: [
                     for (final t in [
                       Tag('@${r!.machine}', icon: Icons.dns_outlined, tooltip: r.local ? 'On the hub machine' : 'On ${r.machine}'),
-                      if (r.model != null || r.effort != null)
+                      if (live) ...[
+                        _Picker(
+                          label: r.model ?? 'model',
+                          icon: Icons.memory,
+                          tooltip: 'Model: tap to switch',
+                          current: r.model,
+                          choices: const ['opus', 'sonnet', 'haiku', 'fable'],
+                          other: 'Other…',
+                          onPick: (v) => onMenu('model:$v'),
+                        ),
+                        _Picker(
+                          label: r.effort == null ? 'effort' : 'effort ${r.effort}',
+                          icon: Icons.speed,
+                          tooltip: 'Effort: tap to switch',
+                          current: r.effort,
+                          choices: const ['low', 'medium', 'high', 'xhigh', 'max'],
+                          onPick: (v) => onMenu('effort:$v'),
+                        ),
+                      ] else if (r.model != null || r.effort != null)
                         Tag([?r.model, ?r.effort].join(' · '), icon: Icons.memory, tooltip: 'Model and effort'),
                       if (r.cwd != null) Tag(_shortPath(r.cwd!), icon: Icons.folder_outlined, tooltip: r.cwd),
                       if (r.temp) const Tag('quick', icon: Icons.bolt),

@@ -81,6 +81,7 @@ class Agent {
     this.model,
     this.effort,
     this.temp = false,
+    this.harness,
     this.subagents = const [],
     required this.fingerprint,
   });
@@ -106,6 +107,12 @@ class Agent {
 
   /// A quick agent, started for one job.
   final bool temp;
+
+  /// What runs it: `sdk` (roster's Agent SDK runner) or `claude` (Claude Code).
+  final String? harness;
+
+  /// An SDK agent: its model and effort switch live, and it can be interrupted.
+  bool get sdk => harness == 'sdk';
   final List<Subagent> subagents;
 
   /// The row as JSON, to tell whether anything about the agent changed.
@@ -146,6 +153,7 @@ class Agent {
       model: json['model'] is String ? json['model'] as String : null,
       effort: json['effort'] is String ? json['effort'] as String : null,
       temp: json['temp'] == true,
+      harness: json['harness'] is String ? json['harness'] as String : null,
       subagents: Subagent.listFromJson(json['subagents']),
       fingerprint: jsonEncode(json),
     );

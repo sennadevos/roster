@@ -306,4 +306,68 @@ void main() {
     await hub.events.close();
     await tester.pump();
   });
+
+  testWidgets('an SDK agent switches model and effort and is interrupted from its header', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final calls = <String>[];
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) => {'agent': q['agent'], 'session_id': 's', 'messages': [], 'next': 0},
+      'GET /v1/screen': (_, q) => {'agent': q['agent'], 'status': 'working', 'text': '', 'dialog': null},
+      'POST /v1/model': (b, _) { calls.add('model ${b['model']}'); return {'ok': true, 'model': b['model']}; },
+      'POST /v1/effort': (b, _) { calls.add('effort ${b['effort']}'); return {'ok': true, 'effort': b['effort']}; },
+      'POST /v1/interrupt': (b, _) { calls.add('interrupt ${b['agent']}'); return {'ok': true, 'interrupted': true}; },
+    });
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({
+      'agents': [
+        row('native', 'srv', 'working', extra: {'harness': 'sdk', 'model': 'opus', 'effort': 'high'}),
+        row('classic', 'srv', 'idle', extra: {'harness': 'claude', 'model': 'opus'}),
+      ],
+      'machines': machines,
+    });
+    await tester.pump();
+    await settle(tester);
+    openAgent('native@srv');
+    await settle(tester);
+
+    await tester.tap(find.text('effort high'));
+    await settle(tester);
+    await tester.tap(find.text('max'));
+    await settle(tester);
+    expect(calls, ['effort max']);
+
+    await tester.tap(find.byTooltip('Model: tap to switch'));
+    await settle(tester);
+    await tester.tap(find.text('sonnet').last);
+    await settle(tester);
+    expect(calls.last, 'model sonnet');
+
+    await tester.tap(find.byTooltip('Interrupt'));
+    await settle(tester);
+    expect(calls.last, 'interrupt native@srv');
+
+    // A Claude Code agent shows its model, with nothing to switch.
+    openAgent('classic@srv');
+    await settle(tester);
+    expect(find.byTooltip('Model: tap to switch'), findsNothing);
+    expect(find.byTooltip('Interrupt'), findsNothing);
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
+}
+
+/// For screens with a spinner, which never settles: pump long enough for
+/// menus, dialogs and requests to be done.
+Future<void> settle(WidgetTester tester) async {
+  for (var k = 0; k < 6; k++) {
+    await tester.pump(const Duration(milliseconds: 150));
+  }
 }

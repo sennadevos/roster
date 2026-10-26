@@ -2573,6 +2573,11 @@ def attach_remote(mach, row):
         return "focused %s@%s" % (name, mach)
     if row.get("attached"):
         raise Fail("%s@%s is already attached somewhere" % (name, mach))
+    # A window whose ssh fails closes before anyone can read why: ask first.
+    try:
+        rpc(mach, "version", timeout=10)
+    except Fail as exc:
+        raise Fail("cannot attach %s@%s: %s" % (name, mach, exc))
     niri("action", "spawn", "--", *terminal(name, mach), *ssh_argv(peer(mach), "attach", name, tty=True))
     return "opened %s@%s" % (name, mach)
 
@@ -3987,6 +3992,11 @@ def main():
         if args.cmd == "hook":
             return 0  # a hook never breaks the session
         print("roster: %s" % exc, file=sys.stderr)
+        if args.cmd in ("attach", "new", "resume") and not sys.stderr.isatty():
+            # Run from the tray, the picker or a keybinding: nobody sees stderr.
+            notify = shutil.which("notify-send")
+            if notify:
+                subprocess.run([notify, "-a", "roster", "roster", str(exc)], capture_output=True, timeout=5)
         return 1
     except Exception:
         if args.cmd == "hook":
