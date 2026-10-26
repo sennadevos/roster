@@ -1767,7 +1767,8 @@ def cmd_resume(args):
     name = check_name(name)
     if mach and mach != machine():
         got = rpc(mach, "resume", name, *(["--model", args.model] if args.model else []),
-                  *(["--effort", args.effort] if args.effort else []))
+                  *(["--effort", args.effort] if args.effort else []),
+                  *(["--harness", args.harness] if args.harness else []))
         print("resumed %s@%s in %s" % (name, mach, got["cwd"]))
         if not args.no_attach:
             print(attach_remote(mach, {"name": name, "attached": False}))
@@ -1778,8 +1779,8 @@ def cmd_resume(args):
         raise Fail("no agent named %s on the roster" % name)
     if e.get("status") not in ("gone", PARKED):
         raise Fail("%s is %s; only a gone or parked agent can be resumed" % (name, e.get("status")))
-    pane = resume_in_tmux(e, args.model, args.effort)
-    print("resumed %s in %s" % (name, short_path(e["cwd"])))
+    pane = resume_in_tmux(e, args.model, args.effort, args.harness)
+    print("resumed %s in %s%s" % (name, short_path(e["cwd"]), " as an %s agent" % args.harness if args.harness else ""))
     if not args.no_attach:
         print(attach(e, {"pane_id": pane, "roster": name, "attached": 0}))
 
@@ -1940,10 +1941,12 @@ def transcript_cwd(session_id):
     return None
 
 
-def resume_in_tmux(e, model=None, effort=None):
+def resume_in_tmux(e, model=None, effort=None, harness=None):
     """Start a gone entry's Claude session again in a roster tmux session; return its id.
 
-    With the model and effort it was started with, unless new ones are given.
+    With the model, effort and harness it was started with, unless new ones
+    are given: a Claude Code agent resumed with harness sdk carries on, same
+    conversation, as an SDK agent.
     """
     cwd = transcript_cwd(e.get("session_id")) or e.get("cwd")
     if not e.get("session_id") or not cwd or not os.path.isdir(cwd):
@@ -1952,6 +1955,8 @@ def resume_in_tmux(e, model=None, effort=None):
         e["model"] = model
     if effort:
         e["effort"] = effort
+    if harness:
+        e["harness"] = new_harness(harness)
     model_args(e.get("model"), e.get("effort"))
     if is_sdk(e):
         # The runner reads its entry on start: write it first, then only add the session.
@@ -3070,7 +3075,7 @@ def cmd_rpc(args):
             if not e or e.get("status") not in ("gone", PARKED):
                 raise Fail("%s is %s here" % (rest[0], e.get("status") if e else "unknown"))
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
-            resume_in_tmux(e, opt("--model"), opt("--effort"))
+            resume_in_tmux(e, opt("--model"), opt("--effort"), opt("--harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
         elif verb == "folders":
             out = local_folders()
@@ -3851,6 +3856,8 @@ def main():
     s.add_argument("name")
     s.add_argument("--model", help="start it with another model than before")
     s.add_argument("--effort", choices=EFFORTS, help="start it with another effort level than before")
+    s.add_argument("--harness", choices=HARNESSES,
+                   help="switch it over: sdk carries a Claude Code agent's conversation on as an SDK agent")
     s.add_argument("--no-attach", action="store_true", help="do not open a window")
     s.set_defaults(fn=cmd_resume)
 

@@ -5,7 +5,7 @@ A roster tmux agent runs one of two harnesses, recorded per entry as `harness`:
 - `claude`: Claude Code's own TUI, as before. roster reads its status from Claude Code's hooks and drives it by typing into the tmux session.
 - `sdk`: roster's runner (`roster-brain agent <session id>`, `brain/roster_brain/runner.py`) on the Claude Agent SDK. It is the default for new agents. An agent keeps the harness it started with, through park, resume and `move --to`, so the two kinds live side by side.
 
-`roster new --harness claude` (or `harness = "claude"` in `~/.config/roster/config.toml`) still starts a Claude Code agent.
+`roster new --harness claude` (or `harness = "claude"` in `~/.config/roster/config.toml`) still starts a Claude Code agent. A gone or parked Claude Code agent switches over with `roster resume <name> --harness sdk`: same conversation, same name, mail and role, now on the runner (and `--harness claude` back again).
 
 ## What stays the same
 
