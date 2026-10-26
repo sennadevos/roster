@@ -14,6 +14,20 @@ import 'status.dart';
 /// the composer under it at the same width.
 const conversationWidth = 880.0;
 
+/// What is selected in the conversation now, for Ctrl+C.
+///
+/// Each message's text is selectable by itself (SelectableText, selectable
+/// markdown), never through a SelectionArea over the conversation: Flutter's
+/// SelectableRegion fails a null check when its parts are torn down while
+/// rows come and go during a turn, and the release build then paints the
+/// conversation gray.
+final conversationSelection = ValueNotifier<String?>(null);
+
+void _selected(String? text, TextSelection selection) {
+  conversationSelection.value =
+      text == null || !selection.isValid || selection.isCollapsed ? null : selection.textInside(text);
+}
+
 /// Centres [child] in a column [conversationWidth] wide.
 Widget inColumn(Widget child) => Center(
       child: ConstrainedBox(constraints: const BoxConstraints(maxWidth: conversationWidth), child: child),
@@ -62,7 +76,8 @@ class UserBubble extends StatelessWidget {
               crossAxisAlignment: CrossAxisAlignment.end,
               mainAxisSize: MainAxisSize.min,
               children: [
-                Text(text,
+                SelectableText(text,
+                    onSelectionChanged: (sel, _) => _selected(text, sel),
                     style: theme.textTheme.bodyMedium?.copyWith(
                       color: cs.onSurface,
                       decoration: withdrawn ? TextDecoration.lineThrough : null,
@@ -113,10 +128,10 @@ class EventLine extends StatelessWidget {
           ),
           const SizedBox(width: 8),
           Expanded(
-            child: Text(
+            child: SelectableText(
               text,
               maxLines: 6,
-              overflow: TextOverflow.ellipsis,
+              onSelectionChanged: (sel, _) => _selected(text, sel),
               style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
             ),
           ),
@@ -143,6 +158,8 @@ class AssistantBlock extends StatelessWidget {
           constraints: const BoxConstraints(maxWidth: 760),
           child: MarkdownBody(
             data: text,
+            selectable: true,
+            onSelectionChanged: (t, sel, _) => _selected(t, sel),
             styleSheet: markdownStyle(context),
             builders: {'pre': CodeBlockBuilder()},
             onTapLink: (text, href, title) {

@@ -20,18 +20,7 @@ import '../widgets/message_tile.dart';
 import '../widgets/status.dart';
 import '../widgets/voice_bar.dart';
 
-/// What is selected in the conversation now, for Ctrl+C.
-final conversationSelection = ValueNotifier<String?>(null);
 
-/// Each message is a selection area of its own, not the conversation as a
-/// whole: one area over a list whose rows come and go while an agent works
-/// trips Flutter's SelectableRegion (a null check in its `remove`), and the
-/// release build then paints the conversation gray. Tool rows, which change
-/// most, are not selectable; their results have a copy button.
-Widget _selectable(Widget child) => SelectionArea(
-      onSelectionChanged: (content) => conversationSelection.value = content?.plainText,
-      child: child,
-    );
 
 /// Ctrl+C (Cmd+C) with text selected in the conversation: copy it. Caught at
 /// the keyboard, before focus: Flutter's own selection copy runs first
@@ -42,9 +31,9 @@ bool _copyKey(KeyEvent e) {
   if (!(HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed)) return false;
   final text = conversationSelection.value;
   if (text == null || text.isEmpty) return false;
-  if (FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>() != null) {
-    return false;
-  }
+  // The composer keeps its own Ctrl+C; selectable message text is read-only.
+  final field = FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>();
+  if (field != null && !field.readOnly) return false;
   copyText(text);
   final ctx = FocusManager.instance.primaryFocus?.context ?? navigatorKey.currentContext;
   if (ctx != null) {
@@ -531,11 +520,11 @@ class _AgentScreenState extends State<AgentScreen> {
         out.add(_Item(key, [for (final r in run) r.key], () => ToolGroup(run, key: ValueKey(key))));
       } else if (m.role == 'user') {
         out.add(_Item(m.key, [m.key],
-            () => _selectable(UserBubble(m.text, key: ValueKey(m.key), queued: m.queued, withdrawn: m.withdrawn))));
+            () => UserBubble(m.text, key: ValueKey(m.key), queued: m.queued, withdrawn: m.withdrawn)));
       } else if (m.role == 'event') {
-        out.add(_Item(m.key, [m.key], () => _selectable(EventLine(m.text, key: ValueKey(m.key)))));
+        out.add(_Item(m.key, [m.key], () => EventLine(m.text, key: ValueKey(m.key))));
       } else {
-        out.add(_Item(m.key, [m.key], () => _selectable(AssistantBlock(m.text, key: ValueKey(m.key)))));
+        out.add(_Item(m.key, [m.key], () => AssistantBlock(m.text, key: ValueKey(m.key))));
       }
     }
     return out;

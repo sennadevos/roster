@@ -291,6 +291,11 @@ void main() {
     openAgent('alpha@srv');
     await tester.pumpAndSettle();
     expect(find.text('hello there'), findsOneWidget);
+    // No SelectionArea over the conversation: Flutter's SelectableRegion fails
+    // a null check when rows are torn down mid-turn, and the release build
+    // then paints the chat gray. Message text selects by itself instead.
+    expect(find.byType(SelectionArea), findsNothing);
+    expect(find.byType(SelectableText), findsWidgets);
 
     await tester.tap(find.textContaining('beta').first, buttons: kSecondaryButton);
     await tester.pumpAndSettle();
