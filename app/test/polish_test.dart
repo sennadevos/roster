@@ -367,6 +367,7 @@ void main() {
     await hub.events.close();
     await tester.pump();
   });
+
 }
 
 /// For screens with a spinner, which never settles: pump long enough for

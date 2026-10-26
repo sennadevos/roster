@@ -1,6 +1,7 @@
 import 'dart:math';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/rendering.dart' show RenderProxyBox;
 import 'package:flutter_markdown_plus/flutter_markdown_plus.dart';
 import 'package:markdown/markdown.dart' as md;
 
@@ -22,6 +23,26 @@ const conversationWidth = 880.0;
 /// rows come and go during a turn, and the release build then paints the
 /// conversation gray.
 final conversationSelection = ValueNotifier<String?>(null);
+
+/// Keeps the conversation still when its text is clicked: selectable text
+/// takes focus, and focus asks the list to scroll it (and a margin) into
+/// view. Here that request stops.
+class StayPut extends SingleChildRenderObjectWidget {
+  const StayPut({super.key, required Widget super.child});
+
+  @override
+  RenderObject createRenderObject(BuildContext context) => _StayPut();
+}
+
+class _StayPut extends RenderProxyBox {
+  @override
+  void showOnScreen({
+    RenderObject? descendant,
+    Rect? rect,
+    Duration duration = Duration.zero,
+    Curve curve = Curves.ease,
+  }) {}
+}
 
 void _selected(String? text, TextSelection selection) {
   conversationSelection.value =
