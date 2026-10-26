@@ -1600,7 +1600,7 @@ def plan_brief(brief):
         raise Fail("planner chose an unknown machine %r" % plan.get("machine"))
     home = machines[plan["machine"]]["home"]
     folder = os.path.normpath(plan.get("folder") or "")
-    if not folder.startswith(home + "/"):
+    if folder != home and not folder.startswith(home + "/"):
         raise Fail("planner chose a folder outside the home: %r" % folder)
     plan["folder"] = folder
     name = re.sub(r"[^a-z0-9/_-]+", "-", plan.get("name", "").lower()).strip("-/") or fresh_id()

@@ -66,8 +66,9 @@ class HubClient {
         if (token != null) 'Authorization': 'Bearer $token',
       };
 
+  /// [timeout] for requests the hub itself gives longer (new, resume).
   Future<Map<String, dynamic>> _send(String method, String path,
-      {Map<String, String>? query, Object? body}) async {
+      {Map<String, String>? query, Object? body, Duration timeout = _timeout}) async {
     final req = http.Request(method, _uri(path, query))..headers.addAll(_headers);
     if (body != null) {
       req.headers['Content-Type'] = 'application/json';
@@ -75,7 +76,7 @@ class HubClient {
     }
     final http.Response res;
     try {
-      res = await http.Response.fromStream(await _client.send(req).timeout(_timeout));
+      res = await http.Response.fromStream(await _client.send(req).timeout(timeout));
     } on TimeoutException {
       throw const HubException(0, 'the hub did not answer in time');
     } on http.ClientException catch (e) {
@@ -150,18 +151,20 @@ class HubClient {
       if (blank(prompt) != null) 'prompt': blank(prompt),
       if (blank(model) != null) 'model': blank(model),
       if (blank(effort) != null) 'effort': blank(effort),
-    });
+    }, timeout: const Duration(seconds: 100)); // the hub allows starting one 90 s
     return '${json['agent']}';
   }
 
   /// Starts an agent from a pasted brief; the hub decides where and how.
   /// Answers its `name@machine` and the plan it followed.
   Future<(String, Map<String, dynamic>)> newFromBrief(String brief) async {
-    final json = await _send('POST', '/v1/new', body: {'brief': brief});
+    // The hub plans it first (a headless Claude), and allows that 240 s.
+    final json = await _send('POST', '/v1/new', body: {'brief': brief}, timeout: const Duration(seconds: 250));
     return ('${json['agent']}', (json['plan'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{});
   }
 
-  Future<void> resume(String agent) => _send('POST', '/v1/resume', body: {'agent': agent});
+  Future<void> resume(String agent) =>
+      _send('POST', '/v1/resume', body: {'agent': agent}, timeout: const Duration(seconds: 100));
 
   Future<void> kill(String agent) => _send('POST', '/v1/kill', body: {'agent': agent});
 
