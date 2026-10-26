@@ -13,9 +13,12 @@ import '../models/transcript.dart';
 import '../state/app_state.dart';
 import '../state/conversation.dart';
 import '../theme.dart';
+import '../voice/engines.dart';
+import '../voice/voice_session.dart';
 import '../widgets/bits.dart';
 import '../widgets/message_tile.dart';
 import '../widgets/status.dart';
+import '../widgets/voice_bar.dart';
 
 /// What is selected in the conversation now, for Ctrl+C.
 final conversationSelection = ValueNotifier<String?>(null);
@@ -85,6 +88,9 @@ class _AgentScreenState extends State<AgentScreen> {
   int _unseen = 0;
   int _lastCount = 0;
 
+  /// Hands-free voice chat with this agent, once the mic was tapped.
+  VoiceSession? _voice;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -111,6 +117,7 @@ class _AgentScreenState extends State<AgentScreen> {
   void dispose() {
     _app?.removeListener(_onApp);
     _conv.removeListener(_onConv);
+    _voice?.dispose();
     AgentScreen.focusRequest.removeListener(_focusIn);
     if (AppState.onScreen == widget.agent) AppState.onScreen = null;
     _scroll.dispose();
@@ -192,6 +199,31 @@ class _AgentScreenState extends State<AgentScreen> {
     if (far) p.jumpTo(p.maxScrollExtent - 600);
     await p.animateTo(p.maxScrollExtent, duration: const Duration(milliseconds: 280), curve: Curves.easeOutCubic);
     _stickToBottom(2);
+  }
+
+  Future<void> _toggleVoice() async {
+    final engines = voiceEngines;
+    if (engines == null) return;
+    var v = _voice;
+    if (v == null) {
+      final (input, output) = engines();
+      v = _voice = VoiceSession(
+        conversation: _conv,
+        row: () => _app!.snapshot.byId(widget.agent),
+        changes: _app!,
+        input: input,
+        output: output,
+      )..addListener(() {
+          if (mounted) setState(() {});
+        });
+      setState(() {});
+    }
+    if (v.active) {
+      await v.stop();
+    } else {
+      FocusManager.instance.primaryFocus?.unfocus();
+      await v.start();
+    }
   }
 
   Future<void> _send() async {
@@ -315,6 +347,7 @@ class _AgentScreenState extends State<AgentScreen> {
                           ))
                         : const SizedBox(width: double.infinity),
                   ),
+                  if (_voice != null) VoiceBar(_voice!),
                   _Composer(
                     controller: _input,
                     focusNode: _inputFocus,
@@ -329,6 +362,8 @@ class _AgentScreenState extends State<AgentScreen> {
                                 : null,
                     onResume: ended ? () => _menu('resume', row) : null,
                     onSend: _send,
+                    onVoice: voiceEngines != null && !ended && !stale ? _toggleVoice : null,
+                    voiceOn: _voice?.active ?? false,
                   ),
                 ],
               );
@@ -1168,7 +1203,13 @@ class _Composer extends StatelessWidget {
     this.disabledReason,
     this.parked = false,
     this.onResume,
+    this.onVoice,
+    this.voiceOn = false,
   });
+
+  /// Starts or stops hands-free voice chat; null where there is no speech engine.
+  final VoidCallback? onVoice;
+  final bool voiceOn;
 
   final TextEditingController controller;
   final FocusNode focusNode;
@@ -1241,6 +1282,17 @@ class _Composer extends StatelessWidget {
                         ),
                       ),
                     ),
+                    if (onVoice != null && onResume == null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(0, 5, 0, 5),
+                        child: IconButton(
+                          onPressed: onVoice,
+                          isSelected: voiceOn,
+                          icon: const Icon(Icons.mic_none_rounded),
+                          selectedIcon: Icon(Icons.mic_rounded, color: cs.primary),
+                          tooltip: voiceOn ? 'Stop voice chat' : 'Voice chat',
+                        ),
+                      ),
                     if (onResume != null)
                       Padding(
                         padding: const EdgeInsets.all(5),

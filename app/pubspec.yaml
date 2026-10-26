@@ -1,15 +1,15 @@
 name: roster
 description: "Phone app for roster-hub: the roster's agents, their conversations and dialogs."
 publish_to: 'none'
-version: 0.1.0+1
+version: 0.4.0+2
 
 environment:
   sdk: ^3.13.5
 
 # Exact versions, looked up on pub.dev on 2026-10-18 (fetch_client and web on
 # 2026-10-19, markdown on 2026-10-20: already locked through
-# flutter_markdown_plus, named here because the code blocks use its types);
-# pubspec.lock pins the rest.
+# flutter_markdown_plus, named here because the code blocks use its types;
+# speech_to_text and flutter_tts on 2026-10-26); pubspec.lock pins the rest.
 dependencies:
   flutter:
     sdk: flutter
@@ -17,8 +17,10 @@ dependencies:
   flutter_local_notifications: 22.3.2
   flutter_markdown_plus: 1.0.12
   flutter_secure_storage: 11.2.0
+  flutter_tts: 4.2.5
   http: 1.6.0
   markdown: 7.3.1
+  speech_to_text: 7.5.0
   unifiedpush: 6.2.0
   web: 1.1.1
   url_launcher: 6.3.3
