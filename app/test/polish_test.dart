@@ -368,6 +368,50 @@ void main() {
     await tester.pump();
   });
 
+
+  testWidgets('capture: Jev unsure, a candidate picked, sent there', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final asked = <Map<String, dynamic>>[];
+    final hub = FakeHub({
+      'POST /v1/capture': (b, _) {
+        asked.add(b);
+        if (b['to'] == null && b['new'] == null) {
+          return {'action': 'ask', 'choice': 'infra@srv', 'confidence': 0.5, 'candidates': [
+            {'agent': 'infra@srv', 'p': 0.5}, {'agent': 'new', 'p': 0.49},
+          ]};
+        }
+        return {'action': 'sent', 'agent': b['to'], 'choice': b['to'], 'confidence': 1.0, 'candidates': []};
+      },
+    });
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({'agents': [row('infra', 'srv', 'idle')], 'machines': machines});
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    await tester.tap(find.byTooltip('Capture: say or type a thought, Jev routes it'));
+    await tester.pumpAndSettle();
+    await tester.enterText(find.byType(TextField).last, 'is the server disk failing?');
+    await tester.tap(find.text('Send'));
+    await tester.pumpAndSettle();
+    expect(asked.single['text'], 'is the server disk failing?');
+    expect(find.textContaining('Jev is not sure'), findsOneWidget);
+
+    await tester.tap(find.textContaining('infra · 50%'));
+    await tester.pumpAndSettle();
+    expect(asked.last['to'], 'infra@srv');
+    expect(find.text('Sent to infra@srv'), findsWidgets);
+    expect(find.textContaining('Jev is not sure'), findsNothing);
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
 }
 
 /// For screens with a spinner, which never settles: pump long enough for

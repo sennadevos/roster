@@ -78,6 +78,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 | `POST /v1/resume` | `{"agent"}` | `{"ok": true}` |
 | `POST /v1/kill` | `{"agent"}`: ends a live agent, or a parked one (it is then gone instead of waiting to be resumed) | `{"ok": true}` |
 | `POST /v1/park` | `{"agent"}`: stop an idle agent's process and keep it on the roster; prompting, mailing or resuming it starts it again. Refused (4xx) while it works, has unread mail or its input holds text | `{"ok": true}` |
+| `POST /v1/capture` | `{"text"}`: a thought, said or typed. Jev picks the agent it fits, or a new agent; at confidence 0.75 or more it goes there (a prompt, or the brief of a new agent). `{"text", "to": agent}` or `{"text", "new": true}` sends it without asking (after a pick). | `{"action": "sent"\|"started"\|"ask", "agent"?, "choice", "confidence", "candidates": [{"agent", "p"}], "plan"?}`; `ask` means Jev was unsure: let the user pick from `candidates` (`new` is a new agent) |
 | `POST /v1/interrupt` | `{"agent"}`: stop the turn in progress (SDK agents) | `{"ok": true, "interrupted": bool}` |
 | `POST /v1/model` | `{"agent", "model"}`: switch model, live (SDK agents) | `{"ok": true, "model"}` |
 | `POST /v1/effort` | `{"agent", "effort"}`: switch effort, live (SDK agents) | `{"ok": true, "effort"}` |

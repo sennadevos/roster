@@ -12,6 +12,7 @@ import '../theme.dart';
 import '../widgets/bits.dart';
 import '../widgets/status.dart';
 import 'agent_screen.dart';
+import 'capture_sheet.dart';
 import 'new_agent_sheet.dart';
 import 'settings_screen.dart';
 
@@ -410,6 +411,12 @@ class _AgentList extends StatelessWidget {
             ),
           if (wide)
             IconButton(
+              icon: const Icon(Icons.mic_none_rounded),
+              tooltip: 'Capture: say or type a thought, Jev routes it',
+              onPressed: () => showCaptureSheet(context),
+            ),
+          if (wide)
+            IconButton(
               icon: const Icon(Icons.add),
               tooltip: 'New agent',
               onPressed: () => showNewAgentSheet(context),
@@ -455,11 +462,21 @@ class _AgentList extends StatelessWidget {
       ),
       floatingActionButton: wide
           ? null
-          : FloatingActionButton.extended(
-              onPressed: () => showNewAgentSheet(context),
-              icon: const Icon(Icons.add),
-              label: const Text('New agent'),
-            ),
+          : Row(mainAxisSize: MainAxisSize.min, children: [
+              FloatingActionButton.small(
+                heroTag: 'new',
+                onPressed: () => showNewAgentSheet(context),
+                tooltip: 'New agent',
+                child: const Icon(Icons.add),
+              ),
+              const SizedBox(width: 12),
+              FloatingActionButton.extended(
+                heroTag: 'capture',
+                onPressed: () => showCaptureSheet(context),
+                icon: const Icon(Icons.mic_rounded),
+                label: const Text('Capture'),
+              ),
+            ]),
       body: Column(
         children: [
           if (app.updateReady)

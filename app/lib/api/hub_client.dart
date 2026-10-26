@@ -180,6 +180,16 @@ class HubClient {
   Future<void> setEffort(String agent, String effort) =>
       _send('POST', '/v1/effort', body: {'agent': agent, 'effort': effort});
 
+  /// A thought for Jev to route: to the agent it fits, or a new agent; [to] or
+  /// [newAgent] send it without asking. Answers the action taken (`sent`,
+  /// `started`) or `ask` with the candidates when Jev was unsure.
+  Future<Map<String, dynamic>> capture(String text, {String? to, bool newAgent = false}) => _send(
+        'POST',
+        '/v1/capture',
+        body: {'text': text, 'to': ?to, if (newAgent) 'new': true},
+        timeout: const Duration(seconds: 250), // a new agent is planned first
+      );
+
   /// Stops an idle agent's process; it stays on the roster and starts again when used.
   Future<void> park(String agent) => _send('POST', '/v1/park', body: {'agent': agent});
 

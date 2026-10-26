@@ -738,6 +738,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ("POST", "/v1/resume"): ("resume", True),
         ("POST", "/v1/kill"): ("kill", True),
         ("POST", "/v1/park"): ("park", True),
+        ("POST", "/v1/capture"): ("capture", True),
         ("POST", "/v1/interrupt"): ("interrupt", True),
         ("POST", "/v1/model"): ("model", True),
         ("POST", "/v1/effort"): ("effort", True),
@@ -1044,6 +1045,22 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cli("resume", check_agent(self.body.get("agent")), "--no-attach", timeout=90)
         self.hub.wake.set()
         return {"ok": True}
+
+    def r_capture(self):
+        """A thought, routed by Jev to the agent it fits, or to a new agent (roster capture)."""
+        text = check_text(self.body.get("text"), "text", 16 * 1024, required=True)
+        if not text.strip():
+            raise HttpError(400, "the text is empty")
+        args = ["capture", "--json"]
+        to = self.body.get("to")
+        if to is not None:
+            args.append("--to=" + check_agent(to))
+        elif self.body.get("new") is True:
+            args.append("--new")
+        out = cli(*args, "-", stdin=text, timeout=240, as_json=True)
+        if out.get("action") in ("sent", "started"):
+            self.hub.wake.set()
+        return out
 
     def r_park(self):
         cli("park", check_agent(self.body.get("agent")), timeout=30)

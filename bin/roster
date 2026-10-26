@@ -1517,6 +1517,104 @@ def cmd_new(args):
     print(attach(entry, {"pane_id": pane, "roster": entry["name"], "attached": 0}))
 
 
+# --- capture: a thought said or typed, routed to the agent it belongs to -----
+#
+# Jev (TypeSafe's System One model, on OpenRouter's Decisions API) picks the
+# live or parked agent whose role the thought fits, or a new agent. When it is
+# sure enough the thought goes there: a prompt to that agent, or the brief of a
+# new one. When it is not, the caller gets the best candidates to choose from.
+
+OPENROUTER_KEY = os.path.expanduser("~/.config/secrets/openrouter-token")
+DECISIONS_URL = "https://openrouter.ai/api/alpha/decisions"
+CAPTURE_FRAME = "[roster capture: the user said this; Jev routed it to you]\n"
+
+
+def capture_agents():
+    rows, _ = list_rows(argparse.Namespace(all=False, filter=None))
+    return [{"agent": "%s@%s" % (r["name"], r["machine"]), "role": r.get("role") or "-", "status": r.get("status")}
+            for r in rows if r.get("status") not in ENDED and not r.get("stale")]
+
+
+def jev_local(text, agents):
+    """Ask Jev with this machine's OpenRouter key; None when there is none here."""
+    import urllib.request
+    try:
+        with open(OPENROUTER_KEY) as f:
+            key = f.read().strip()
+    except OSError:
+        return None
+    criteria = {a["agent"]: a["role"] + (" (parked)" if a.get("status") == PARKED else "") for a in agents}
+    criteria["new"] = "None of the agents above: this needs a new agent of its own"
+    body = {"model": config().get("jev_model") or "~typesafe/jev-latest", "state": {"thought": text},
+            "questions": {"agent": {"type": "choice", "criteria": criteria, "instructions":
+                          "The user said this thought out loud. Which agent's work does it belong to? Pick the agent "
+                          "whose role it fits; pick new when none of them works on this."}}}
+    req = urllib.request.Request(DECISIONS_URL, data=json.dumps(body).encode(), headers={
+        "Authorization": "Bearer " + key, "Content-Type": "application/json",
+        "HTTP-Referer": "https://github.com/sennadevos/roster", "X-Title": "roster capture"})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            got = json.load(r)
+    except (OSError, ValueError) as exc:
+        raise Fail("Jev did not answer: %s" % exc)
+    a = (got.get("answers") or {}).get("agent") or {}
+    probs = sorted((a.get("probabilities") or {}).items(), key=lambda kv: -kv[1])
+    return {"choice": a.get("choice"), "confidence": a.get("confidence") or 0,
+            "candidates": [{"agent": k, "p": round(v, 3)} for k, v in probs[:3]]}
+
+
+def jev_choose(text, agents):
+    """Jev's pick, asked here, or on a peer that has the OpenRouter key."""
+    got = jev_local(text, agents)
+    if got is not None:
+        return got
+    for m in peers():
+        try:
+            got = rpc(m, "capture-decide", data={"text": text, "agents": agents}, timeout=40)
+        except Fail:
+            continue
+        if got.get("choice"):
+            return got
+    raise Fail("no OpenRouter key here (%s) or on a reachable peer to ask Jev with" % short_path(OPENROUTER_KEY))
+
+
+def cmd_capture(args):
+    import contextlib
+    import io
+    text = (sys.stdin.read() if args.text in (None, "-") else args.text).strip()
+    if not text:
+        raise Fail("nothing to capture")
+    if args.to or args.new:
+        decision = {"choice": "new" if args.new else args.to, "confidence": 1.0, "candidates": [], "forced": True}
+    else:
+        decision = jev_choose(text, capture_agents())
+    sure = decision.get("forced") or decision["confidence"] >= float(config().get("capture_sure", 0.75))
+    out = dict(decision, text=text)
+    if args.dry_run or not sure:
+        out["action"] = "dry-run" if args.dry_run else "ask"
+    elif decision["choice"] == "new":
+        buf = io.StringIO()
+        new_args = argparse.Namespace(
+            brief=text, prompt=None, dry_run=False, json=True, no_attach=True, window=False, temp=False,
+            name=None, role=None, on=None, cwd=None, model=None, effort=None, harness=None)
+        with contextlib.redirect_stdout(buf):
+            cmd_new(new_args)
+        started = json.loads(buf.getvalue())
+        out.update(action="started", agent=started.get("agent"), plan=started.get("plan"))
+    else:
+        view("prompt", decision["choice"], {}, {"text": CAPTURE_FRAME + text})
+        out.update(action="sent", agent=decision["choice"])
+    if args.json:
+        print(json.dumps(out))
+    elif out["action"] in ("ask", "dry-run"):
+        print("%s: Jev %s %s (%.2f); candidates: %s" % (
+            out["action"], "would pick" if out["action"] == "dry-run" else "is unsure, leaning to",
+            decision["choice"], decision["confidence"],
+            ", ".join("%s %.2f" % (c["agent"], c["p"]) for c in decision["candidates"])))
+    else:
+        print("%s %s" % ("sent to" if out["action"] == "sent" else "started", out["agent"]))
+
+
 def model_args(model, effort):
     """Claude Code's own --model and --effort; checked here so a typo fails before a session starts."""
     if effort and effort not in EFFORTS:
@@ -3100,6 +3198,9 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"), opt("--harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "capture-decide":
+            p = json.load(sys.stdin)
+            out = jev_local(p["text"], p["agents"]) or {"choice": None, "error": "no OpenRouter key on %s" % machine()}
         elif verb == "folders":
             out = local_folders()
         elif verb in ("adopt", "adopt-check"):
@@ -3935,6 +4036,14 @@ def main():
     s.add_argument("keys", nargs="+", help="Up Down Left Right Enter Escape Tab BSpace 0-9 y n")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_view)
+
+    s = sub.add_parser("capture", help="a thought, routed by Jev to the agent it fits, or to a new agent")
+    s.add_argument("text", nargs="?", help="the thought, or - / omitted for stdin")
+    s.add_argument("--to", metavar="AGENT", help="send it to this agent, without asking Jev")
+    s.add_argument("--new", action="store_true", help="start a new agent with it, without asking Jev")
+    s.add_argument("--dry-run", action="store_true", help="only say where Jev would send it")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_capture)
 
     s = sub.add_parser("interrupt", help="stop an SDK agent's turn in progress")
     s.add_argument("agent")
