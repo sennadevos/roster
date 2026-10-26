@@ -23,6 +23,16 @@ import '../widgets/voice_bar.dart';
 /// What is selected in the conversation now, for Ctrl+C.
 final conversationSelection = ValueNotifier<String?>(null);
 
+/// Each message is a selection area of its own, not the conversation as a
+/// whole: one area over a list whose rows come and go while an agent works
+/// trips Flutter's SelectableRegion (a null check in its `remove`), and the
+/// release build then paints the conversation gray. Tool rows, which change
+/// most, are not selectable; their results have a copy button.
+Widget _selectable(Widget child) => SelectionArea(
+      onSelectionChanged: (content) => conversationSelection.value = content?.plainText,
+      child: child,
+    );
+
 /// Ctrl+C (Cmd+C) with text selected in the conversation: copy it. Caught at
 /// the keyboard, before focus: Flutter's own selection copy runs first
 /// otherwise, and throws on a plain-HTTP page. A focused text field (the
@@ -441,9 +451,7 @@ class _AgentScreenState extends State<AgentScreen> {
     final newer = items.sublist(boundary);
     final working = status == 'working';
     final theme = Theme.of(context);
-    return SelectionArea(
-      onSelectionChanged: (content) => conversationSelection.value = content?.plainText,
-      child: CustomScrollView(
+    return CustomScrollView(
         controller: _scroll,
         center: _centerKey,
         anchor: 1.0,
@@ -498,7 +506,6 @@ class _AgentScreenState extends State<AgentScreen> {
             ),
           ),
         ],
-      ),
     );
   }
 
@@ -524,11 +531,11 @@ class _AgentScreenState extends State<AgentScreen> {
         out.add(_Item(key, [for (final r in run) r.key], () => ToolGroup(run, key: ValueKey(key))));
       } else if (m.role == 'user') {
         out.add(_Item(m.key, [m.key],
-            () => UserBubble(m.text, key: ValueKey(m.key), queued: m.queued, withdrawn: m.withdrawn)));
+            () => _selectable(UserBubble(m.text, key: ValueKey(m.key), queued: m.queued, withdrawn: m.withdrawn))));
       } else if (m.role == 'event') {
-        out.add(_Item(m.key, [m.key], () => EventLine(m.text, key: ValueKey(m.key))));
+        out.add(_Item(m.key, [m.key], () => _selectable(EventLine(m.text, key: ValueKey(m.key)))));
       } else {
-        out.add(_Item(m.key, [m.key], () => AssistantBlock(m.text, key: ValueKey(m.key))));
+        out.add(_Item(m.key, [m.key], () => _selectable(AssistantBlock(m.text, key: ValueKey(m.key)))));
       }
     }
     return out;
