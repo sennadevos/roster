@@ -131,6 +131,14 @@ class _AgentsScreenState extends State<AgentsScreen> {
       }
       return KeyEventResult.handled;
     }
+    // Ctrl+B (Cmd+B), also while typing: fold the agent list away, or back.
+    if (key == LogicalKeyboardKey.keyB &&
+        (HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed) &&
+        splitView && selectedAgent.value != null) {
+      final app = AppScope.read(context);
+      app.setListHidden(!app.listHidden);
+      return KeyEventResult.handled;
+    }
     if (_typing || HardwareKeyboard.instance.isControlPressed || HardwareKeyboard.instance.isMetaPressed ||
         HardwareKeyboard.instance.isAltPressed) {
       return KeyEventResult.ignored;
@@ -200,8 +208,11 @@ class _AgentsScreenState extends State<AgentsScreen> {
             valueListenable: selectedAgent,
             builder: (context, agent, _) => Row(
               children: [
-                SizedBox(width: box.maxWidth >= 1200 ? 400 : 360, child: list(agent)),
-                const VerticalDivider(width: 1),
+                // Folded away only while an agent is open: else there is nothing to show.
+                if (!(app.listHidden && agent != null)) ...[
+                  SizedBox(width: box.maxWidth >= 1200 ? 400 : 360, child: list(agent)),
+                  const VerticalDivider(width: 1),
+                ],
                 Expanded(
                   child: AnimatedSwitcher(
                     duration: const Duration(milliseconds: 160),

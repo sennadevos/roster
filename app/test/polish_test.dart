@@ -412,6 +412,43 @@ void main() {
     await hub.events.close();
     await tester.pump();
   });
+
+  testWidgets('the agent list folds away beside an open agent, by its button or Ctrl+B, and stays so', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) => {'agent': q['agent'], 'session_id': 's', 'messages': [], 'next': 0},
+      'GET /v1/screen': (_, q) => {'agent': q['agent'], 'status': 'idle', 'text': '', 'dialog': null},
+    });
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({'agents': [row('alpha', 'srv', 'idle'), row('beta', 'srv', 'idle')], 'machines': machines});
+    await tester.pump();
+    await tester.pumpAndSettle();
+    openAgent('alpha@srv');
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentTile), findsNWidgets(2));
+
+    await tester.tap(find.byTooltip('Hide the agent list (Ctrl+B)'));
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentTile), findsNothing);
+    expect(store.values[Keys.listHidden], 'yes');
+
+    await tester.sendKeyDownEvent(LogicalKeyboardKey.controlLeft);
+    await tester.sendKeyEvent(LogicalKeyboardKey.keyB);
+    await tester.sendKeyUpEvent(LogicalKeyboardKey.controlLeft);
+    await tester.pumpAndSettle();
+    expect(find.byType(AgentTile), findsNWidgets(2));
+    expect(store.values[Keys.listHidden], 'no');
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
 }
 
 /// For screens with a spinner, which never settles: pump long enough for

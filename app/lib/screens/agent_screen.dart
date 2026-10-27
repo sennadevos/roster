@@ -343,6 +343,8 @@ class _AgentScreenState extends State<AgentScreen> {
           agent: widget.agent,
           row: row,
           backButton: ownPage,
+          listHidden: _app!.listHidden,
+          onToggleList: ownPage ? null : () => _app!.setListHidden(!_app!.listHidden),
           onMenu: (a) => _menu(a, row),
         ),
         body: SafeArea(
@@ -629,7 +631,17 @@ class _Picker extends StatelessWidget {
 }
 
 class _Header extends StatelessWidget implements PreferredSizeWidget {
-  const _Header({required this.agent, required this.row, required this.backButton, required this.onMenu});
+  const _Header(
+      {required this.agent,
+      required this.row,
+      required this.backButton,
+      required this.onMenu,
+      this.listHidden = false,
+      this.onToggleList});
+
+  /// Beside the list (a wide window): fold the list away or bring it back.
+  final VoidCallback? onToggleList;
+  final bool listHidden;
 
   final String agent;
   final Agent? row;
@@ -668,7 +680,19 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
               height: 64,
               child: Row(
                 children: [
-                  if (backButton) const BackButton() else const SizedBox(width: 20),
+                  if (backButton)
+                    const BackButton()
+                  else if (onToggleList != null)
+                    Padding(
+                      padding: const EdgeInsets.only(left: 6, right: 2),
+                      child: IconButton(
+                        onPressed: onToggleList,
+                        icon: Icon(listHidden ? Icons.menu_rounded : Icons.menu_open_rounded),
+                        tooltip: listHidden ? 'Show the agent list (Ctrl+B)' : 'Hide the agent list (Ctrl+B)',
+                      ),
+                    )
+                  else
+                    const SizedBox(width: 20),
                   Expanded(
                     child: Column(
                       mainAxisAlignment: MainAxisAlignment.center,

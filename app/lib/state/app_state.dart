@@ -151,6 +151,15 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     await store.write(Keys.listView, on ? 'recent' : 'machines');
   }
 
+  /// On a wide window: the agent list folded away, the open agent full width.
+  bool listHidden = false;
+
+  Future<void> setListHidden(bool hidden) async {
+    listHidden = hidden;
+    notifyListeners();
+    await store.write(Keys.listHidden, hidden ? 'yes' : 'no');
+  }
+
   Future<void> setThemeMode(ThemeMode mode) async {
     themeMode.value = mode;
     await store.write(Keys.theme, mode.name);
@@ -169,6 +178,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     deviceId = await store.read(Keys.deviceId);
     notifications = (await store.read(Keys.notifications)) != 'off';
     recentView = (await store.read(Keys.listView)) == 'recent';
+    listHidden = (await store.read(Keys.listHidden)) == 'yes';
     final theme = await store.read(Keys.theme);
     themeMode.value = ThemeMode.values.where((m) => m.name == theme).firstOrNull ?? ThemeMode.system;
     if (token != null) client = _clientFor(hubUrl, token);
