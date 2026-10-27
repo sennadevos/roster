@@ -29,3 +29,6 @@ Future<bool> copyText(String text) async {
 
 /// The Android app updates through its APK, not by reloading.
 void reloadPage() {}
+
+/// The Android app has no window to focus.
+void Function() onWindowFocus(void Function() callback) => () {};

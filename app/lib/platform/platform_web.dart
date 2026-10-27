@@ -1,3 +1,5 @@
+import 'dart:js_interop';
+
 import 'package:fetch_client/fetch_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:web/web.dart' as web;
@@ -68,4 +70,12 @@ class Push extends NoPush {
   static Future<void> init(Store store) async {}
 
   static Future<String?> launchAgent() async => null;
+}
+
+/// Calls [callback] whenever the browser window gains focus; the returned
+/// function stops it.
+void Function() onWindowFocus(void Function() callback) {
+  final listener = ((web.Event _) => callback()).toJS;
+  web.window.addEventListener('focus', listener);
+  return () => web.window.removeEventListener('focus', listener);
 }

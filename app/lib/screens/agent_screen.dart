@@ -94,6 +94,10 @@ class _AgentScreenState extends State<AgentScreen> {
   /// there is more to read: look every few seconds.
   Timer? _poll;
 
+  /// Stops the window-focus listener (web): back in the window, the keyboard
+  /// goes to the composer, or to the dialog when the agent asks something.
+  void Function()? _offWindowFocus;
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -114,6 +118,7 @@ class _AgentScreenState extends State<AgentScreen> {
     _conv.addListener(_onConv);
     _scroll.addListener(_onScroll);
     AgentScreen.focusRequest.addListener(_focusIn);
+    _offWindowFocus = onWindowFocus(_windowFocused);
     _poll = Timer.periodic(const Duration(seconds: 3), (_) {
       final status = _app!.snapshot.byId(widget.agent)?.status;
       if (status == 'working' || status == 'blocked' || _conv.messages.any((m) => m.queued)) {
@@ -128,6 +133,7 @@ class _AgentScreenState extends State<AgentScreen> {
     _conv.removeListener(_onConv);
     _voice?.dispose();
     _poll?.cancel();
+    _offWindowFocus?.call();
     AgentScreen.focusRequest.removeListener(_focusIn);
     if (AppState.onScreen == widget.agent) AppState.onScreen = null;
     _scroll.dispose();
@@ -135,6 +141,16 @@ class _AgentScreenState extends State<AgentScreen> {
     _inputFocus.dispose();
     _dialogFocus.dispose();
     super.dispose();
+  }
+
+  void _windowFocused() {
+    if (!mounted) return;
+    // Only the agent on top (no sheet or dialog over it), and never away from
+    // another text field the user is in, such as the search.
+    if (!(ModalRoute.of(context)?.isCurrent ?? true)) return;
+    final focused = FocusManager.instance.primaryFocus?.context?.findAncestorWidgetOfExactType<EditableText>();
+    if (focused != null && !focused.readOnly) return;
+    _focusIn();
   }
 
   void _focusIn() {
