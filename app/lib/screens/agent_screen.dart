@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
+import 'package:image_picker/image_picker.dart';
 
 import '../app.dart';
 import '../platform/platform.dart';
@@ -89,6 +90,9 @@ class _AgentScreenState extends State<AgentScreen> {
 
   /// Hands-free voice chat with this agent, once the mic was tapped.
   VoiceSession? _voice;
+
+  /// Photos to go with the next prompt: (name, bytes), already shrunk.
+  final List<(String, Uint8List)> _photos = [];
 
   /// While the agent works its row does not change, so nothing else says
   /// there is more to read: look every few seconds.
@@ -254,18 +258,73 @@ class _AgentScreenState extends State<AgentScreen> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if (text.isEmpty) return;
+    if (text.isEmpty && _photos.isEmpty) return;
+    final photos = List.of(_photos);
     // Shown at once (pending); the field is free for the next one.
     _input.clear();
+    setState(_photos.clear);
     _atBottom = true;
     _stickToBottom();
     try {
-      await _conv.send(text);
+      await _conv.send(text, images: photos);
     } catch (e) {
       if (!mounted) return;
       if (_input.text.isEmpty) _input.text = text;
+      if (_photos.isEmpty) setState(() => _photos.addAll(photos));
       showError(context, e);
     }
+  }
+
+  /// Photos for the next prompt: the camera or the gallery on a phone, a file
+  /// picker on the web. Shrunk here (at most 1600 px, JPEG quality 80), so a
+  /// prompt stays well under the hub's limit and Claude reads them quickly.
+  Future<void> _addPhotos() async {
+    final picker = ImagePicker();
+    ImageSource? source = ImageSource.gallery;
+    if (!kIsWeb) {
+      source = await showModalBottomSheet<ImageSource>(
+        context: context,
+        builder: (c) => SafeArea(
+          child: Column(mainAxisSize: MainAxisSize.min, children: [
+            ListTile(
+              leading: const Icon(Icons.photo_camera_outlined),
+              title: const Text('Take a photo'),
+              onTap: () => Navigator.pop(c, ImageSource.camera),
+            ),
+            ListTile(
+              leading: const Icon(Icons.photo_library_outlined),
+              title: const Text('Choose photos'),
+              onTap: () => Navigator.pop(c, ImageSource.gallery),
+            ),
+          ]),
+        ),
+      );
+      if (source == null) return;
+    }
+    try {
+      final files = source == ImageSource.camera
+          ? [?await picker.pickImage(source: ImageSource.camera, maxWidth: 1600, maxHeight: 1600, imageQuality: 80)]
+          : await picker.pickMultiImage(maxWidth: 1600, maxHeight: 1600, imageQuality: 80, limit: 6);
+      final picked = <(String, Uint8List)>[];
+      for (final f in files) {
+        picked.add((_photoName(f), await f.readAsBytes()));
+      }
+      if (!mounted || picked.isEmpty) return;
+      setState(() {
+        _photos.addAll(picked);
+        if (_photos.length > 6) _photos.removeRange(6, _photos.length); // the hub takes six at most
+      });
+    } catch (e) {
+      if (mounted) showError(context, e);
+    }
+  }
+
+  /// A name roster takes: an image extension it knows, from the type when the name has none.
+  static String _photoName(XFile f) {
+    final name = f.name.isEmpty ? 'photo' : f.name;
+    if (RegExp(r'\.(jpe?g|png|gif|webp)$', caseSensitive: false).hasMatch(name)) return name;
+    final ext = switch (f.mimeType) { 'image/png' => 'png', 'image/gif' => 'gif', 'image/webp' => 'webp', _ => 'jpg' };
+    return '$name.$ext';
   }
 
   Future<void> _menu(String action, Agent? row) async {
@@ -413,6 +472,8 @@ class _AgentScreenState extends State<AgentScreen> {
                         : const SizedBox(width: double.infinity),
                   ),
                   if (_voice != null) VoiceBar(_voice!),
+                  if (_photos.isNotEmpty)
+                    _PhotoStrip(photos: _photos, onRemove: (k) => setState(() => _photos.removeAt(k))),
                   _Composer(
                     controller: _input,
                     focusNode: _inputFocus,
@@ -428,6 +489,8 @@ class _AgentScreenState extends State<AgentScreen> {
                     onResume: ended ? () => _menu('resume', row) : null,
                     onSend: _send,
                     onVoice: voiceEngines != null && !ended && !stale ? _toggleVoice : null,
+                    onPhotos: !ended && !stale ? _addPhotos : null,
+                    photoCount: _photos.length,
                     voiceOn: _voice?.active ?? false,
                   ),
                 ],
@@ -642,6 +705,57 @@ class _Picker extends StatelessWidget {
         Tag(label, icon: icon),
         const Icon(Icons.arrow_drop_down, size: 16),
       ]),
+    );
+  }
+}
+
+/// The photos that go with the next prompt, above the composer; each can go.
+class _PhotoStrip extends StatelessWidget {
+  const _PhotoStrip({required this.photos, required this.onRemove});
+
+  final List<(String, Uint8List)> photos;
+  final void Function(int) onRemove;
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: conversationWidth - 24),
+          child: SizedBox(
+            height: 72,
+            child: ListView.separated(
+              scrollDirection: Axis.horizontal,
+              itemCount: photos.length,
+              separatorBuilder: (_, _) => const SizedBox(width: 8),
+              itemBuilder: (context, k) => Stack(children: [
+                ClipRRect(
+                  borderRadius: BorderRadius.circular(10),
+                  child: Image.memory(photos[k].$2, width: 72, height: 72, fit: BoxFit.cover),
+                ),
+                Positioned(
+                  top: 2,
+                  right: 2,
+                  child: Material(
+                    color: cs.surface.withValues(alpha: 0.85),
+                    shape: const CircleBorder(),
+                    child: InkWell(
+                      customBorder: const CircleBorder(),
+                      onTap: () => onRemove(k),
+                      child: Padding(
+                        padding: const EdgeInsets.all(3),
+                        child: Icon(Icons.close, size: 14, color: cs.onSurface, semanticLabel: 'Remove photo'),
+                      ),
+                    ),
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1352,7 +1466,13 @@ class _Composer extends StatelessWidget {
     this.onResume,
     this.onVoice,
     this.voiceOn = false,
+    this.onPhotos,
+    this.photoCount = 0,
   });
+
+  /// Adds photos to the next prompt; with some added, sending needs no text.
+  final VoidCallback? onPhotos;
+  final int photoCount;
 
   /// Starts or stops hands-free voice chat; null where there is no speech engine.
   final VoidCallback? onVoice;
@@ -1381,7 +1501,7 @@ class _Composer extends StatelessWidget {
           child: ListenableBuilder(
             listenable: Listenable.merge([controller, focusNode]),
             builder: (context, _) {
-              final canSend = enabled && controller.text.trim().isNotEmpty;
+              final canSend = enabled && (controller.text.trim().isNotEmpty || photoCount > 0);
               return AnimatedContainer(
                 duration: const Duration(milliseconds: 150),
                 decoration: BoxDecoration(
@@ -1429,6 +1549,15 @@ class _Composer extends StatelessWidget {
                         ),
                       ),
                     ),
+                    if (onPhotos != null && onResume == null)
+                      Padding(
+                        padding: const EdgeInsets.fromLTRB(0, 5, 0, 5),
+                        child: IconButton(
+                          onPressed: enabled ? onPhotos : null,
+                          icon: const Icon(Icons.add_photo_alternate_outlined),
+                          tooltip: 'Add photos',
+                        ),
+                      ),
                     if (onVoice != null && onResume == null)
                       Padding(
                         padding: const EdgeInsets.fromLTRB(0, 5, 0, 5),

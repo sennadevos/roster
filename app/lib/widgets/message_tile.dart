@@ -69,11 +69,16 @@ class UserBubble extends StatelessWidget {
   /// Pulled back into the agent's input to edit: never sent as it was.
   final bool withdrawn;
 
+  /// "[Attached image: …/20261027-134453-1-red.png]" as "📷 red.png".
+  static String shown(String text) => text.replaceAllMapped(
+      RegExp(r'^\[Attached image: (?:.*/)?(?:\d{8}-\d{6}-\d+-)?([^/\]]+)\]$', multiLine: true), (m) => '📷 ${m[1]}');
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
     final dark = theme.brightness == Brightness.dark;
+    final text = shown(this.text);
     return LayoutBuilder(builder: (context, box) {
       return Align(
         alignment: Alignment.centerRight,

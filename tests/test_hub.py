@@ -5,6 +5,7 @@
 
 import http.client
 import http.server
+import base64
 import json
 import os
 import shutil
@@ -202,8 +203,10 @@ class HubTest(unittest.TestCase):
         self.assertEqual(self.request("POST", "/v1/pair", {"code": code}, headers={"X-Forwarded-For": "203.0.113.10"})[0], 200)
 
     def test_body_limit(self):
-        status, _ = self.request("POST", "/v1/prompt", token=self.token, raw=b"x" * (256 * 1024 + 1))
+        status, _ = self.request("POST", "/v1/keys", token=self.token, raw=b"x" * (256 * 1024 + 1))
         self.assertEqual(status, 413)
+        # A prompt may carry photos: its limit is 20 MiB.
+        self.assertEqual(self.request("POST", "/v1/prompt", token=self.token, raw=b"x" * (256 * 1024 + 1))[0], 400)
         self.assertEqual(self.request("POST", "/v1/prompt", token=self.token, raw=b"[1]")[0], 400)
 
     def test_agents(self):
@@ -251,6 +254,16 @@ class HubTest(unittest.TestCase):
             status, got = self.request("POST", "/v1/prompt", {"agent": bad, "text": "x"}, token=self.token)
             self.assertEqual(status, 400, bad)
         self.assertEqual(self.request("POST", "/v1/prompt", {"agent": "infra@hub1", "text": ""}, token=self.token)[0], 400)
+        # photos: kept by roster on the agent's machine (--with), so the text may be empty
+        jpeg = base64.b64encode(b"\xff\xd8\xff fake jpeg").decode()
+        status, got = self.request("POST", "/v1/prompt", {"agent": "infra@hub1", "text": "",
+                                                          "images": [{"name": "my photo.jpg", "data": jpeg}]}, token=self.token)
+        self.assertEqual((status, got), (200, {"ok": True}))
+        call = [c for c in self.calls() if c["argv"][:3] == ["prompt", "infra@hub1", "-"]][-1]
+        self.assertEqual(len(call["argv"]), 4)
+        self.assertTrue(call["argv"][3].startswith("--with=") and call["argv"][3].endswith("1-my-photo.jpg"))
+        self.assertEqual(self.request("POST", "/v1/prompt", {"agent": "infra@hub1", "images": [{"name": "x.jpg", "data": "%%%"}]},
+                                      token=self.token)[0], 400)
         # the CLI's refusal comes through with its reason
         status, got = self.request("POST", "/v1/prompt", {"agent": "busy@hub1", "text": "x"}, token=self.token)
         self.assertEqual(status, 400)

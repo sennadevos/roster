@@ -32,6 +32,20 @@ class Conversation extends ChangeNotifier {
   /// Prompts sent but not yet seen in the transcript, shown dimmed.
   final List<String> pending = [];
 
+  /// How a pending prompt shows up in the transcript: its text, or (photos
+  /// only) an empty key that any message with an attached image matches.
+  final Map<String, String> _pendingKey = {};
+
+  void _seen(String userText) {
+    final t = userText.trim();
+    pending.removeWhere((p) {
+      final key = _pendingKey[p] ?? p;
+      final hit = key.isEmpty ? t.contains('[Attached image:') : (t == key || t.startsWith('$key\n'));
+      if (hit) _pendingKey.remove(p);
+      return hit;
+    });
+  }
+
   /// An answer to the dialog went out; the screen has not shown the next
   /// state yet.
   bool answered = false;
@@ -71,7 +85,7 @@ class Conversation extends ChangeNotifier {
         ..clear()
         ..addAll(page.messages);
       for (final m in page.messages) {
-        if (m.role == 'user') pending.remove(m.text.trim());
+        if (m.role == 'user') _seen(m.text);
       }
       sessionId = page.sessionId;
       next = page.next;
@@ -141,7 +155,7 @@ class Conversation extends ChangeNotifier {
   void _merge(List<Message> fresh) {
     // A prompt shows up in the transcript as a user line: it is sent.
     for (final m in fresh) {
-      if (m.role == 'user') pending.remove(m.text.trim());
+      if (m.role == 'user') _seen(m.text);
     }
     final at = {for (var k = 0; k < messages.length; k++) messages[k].key: k};
     for (final m in fresh) {
@@ -203,14 +217,19 @@ class Conversation extends ChangeNotifier {
 
   /// Sends a prompt. It shows at once as pending, and goes when the
   /// transcript has it; on failure it is taken back and the error rethrown.
-  Future<void> send(String text) async {
-    final t = text.trim();
+  Future<void> send(String text, {List<(String, Uint8List)> images = const []}) async {
+    final key = text.trim();
+    final n = images.length;
+    // What the bubble shows while it goes; photos as a count.
+    final t = [if (key.isNotEmpty) key, if (n > 0) '📷 $n photo${n == 1 ? '' : 's'}'].join('\n');
     pending.add(t);
+    _pendingKey[t] = key;
     _changed();
     try {
-      await client.prompt(agent, t);
+      await client.prompt(agent, key, images: images);
     } catch (_) {
       pending.remove(t);
+      _pendingKey.remove(t);
       _changed();
       rethrow;
     }
@@ -228,6 +247,7 @@ class Conversation extends ChangeNotifier {
       await fetchNew();
     }
     // Never seen (the transcript may word it differently): stop waiting.
+    _pendingKey.remove(t);
     if (pending.remove(t)) _changed();
   }
 

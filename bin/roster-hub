@@ -26,6 +26,7 @@ Config is ${XDG_CONFIG_HOME:-~/.config}/roster/hub.toml:
 """
 
 import argparse
+import base64
 import contextlib
 import fcntl
 import hashlib
@@ -98,6 +99,9 @@ PAIR_FAILS = 5
 PAIR_FAILS_ALL = 50
 
 MAX_BODY = 256 * 1024
+# A prompt may carry photos (the app shrinks them first); only that route takes this much.
+MAX_PROMPT_BODY = 20 * 1024 * 1024
+MAX_IMAGES = 6
 PING = 25
 DEBOUNCE = 0.3
 MAX_STREAMS = 32
@@ -813,7 +817,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise HttpError(405, "method not allowed")
                 raise HttpError(404, "not found")
             name, auth = route
-            length = self.body_length(method)
+            length = self.body_length(method, MAX_PROMPT_BODY if name == "prompt" else MAX_BODY)
             self.device = None
             if auth:
                 self.device = self.authorize()
@@ -873,7 +877,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         if not head:
             self.wfile.write(data)
 
-    def body_length(self, method):
+    def body_length(self, method, limit=MAX_BODY):
         """Checked before anything is read: a body too big is refused unread."""
         if self.headers.get("Transfer-Encoding"):
             raise HttpError(411, "send a Content-Length, not a chunked body")
@@ -883,8 +887,8 @@ class Handler(http.server.BaseHTTPRequestHandler):
             raise HttpError(400, "bad Content-Length")
         if length < 0:
             raise HttpError(400, "bad Content-Length")
-        if length > MAX_BODY:
-            raise HttpError(413, "body over %d KiB" % (MAX_BODY // 1024))
+        if length > limit:
+            raise HttpError(413, "body over %d KiB" % (limit // 1024))
         if method == "POST" and not length:
             raise HttpError(400, "a JSON body is needed")
         return length
@@ -959,9 +963,28 @@ class Handler(http.server.BaseHTTPRequestHandler):
         return cli("screen", check_agent(self.arg("agent")), "--json", timeout=20, as_json=True)
 
     def r_prompt(self):
+        """A prompt, with photos when `images` is [{"name", "data": base64}]: they are
+        kept on the agent's machine and the prompt names their paths."""
         agent = check_agent(self.body.get("agent"))
-        text = check_text(self.body.get("text"), "text", 64 * 1024, required=True)
-        cli("prompt", agent, "-", stdin=text, timeout=20)
+        images = self.body.get("images") or []
+        if not isinstance(images, list) or len(images) > MAX_IMAGES:
+            raise HttpError(400, "images must be a list of at most %d" % MAX_IMAGES)
+        text = check_text(self.body.get("text"), "text", 64 * 1024, required=not images) or ""
+        with tempfile.TemporaryDirectory() as tmp:
+            args = []
+            for k, im in enumerate(images):
+                if not isinstance(im, dict) or not isinstance(im.get("data"), str):
+                    raise HttpError(400, "each image is {name, data}")
+                name = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(str(im.get("name") or "photo.jpg")))[-60:]
+                try:
+                    raw = base64.b64decode(im["data"], validate=True)
+                except (ValueError, TypeError):
+                    raise HttpError(400, "image %d is not base64" % (k + 1))
+                path = os.path.join(tmp, "%d-%s" % (k + 1, name or "photo.jpg"))
+                with open(path, "wb") as f:
+                    f.write(raw)
+                args.append("--with=" + path)
+            cli("prompt", agent, "-", *args, stdin=text, timeout=60)
         self.hub.wake.set()
         return {"ok": True}
 

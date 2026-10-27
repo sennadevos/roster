@@ -1,3 +1,6 @@
+import 'package:roster/widgets/message_tile.dart';
+import 'dart:typed_data';
+import 'dart:convert';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:roster/state/conversation.dart';
 
@@ -85,5 +88,34 @@ void main() {
     await c.fetchNew();
     expect(c.messages.where((m) => m.text == 'and also this').single.queued, isFalse);
     expect(c.messages.last.role, 'event');
+  });
+
+  test('a prompt with photos: sent along, shown as a count, then as the transcript names them', () async {
+    var transcript = <Map<String, dynamic>>[{'i': 1, 'role': 'assistant', 'text': 'ready'}];
+    Map<String, dynamic>? sent;
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) {
+        final after = q['after'] == null ? null : int.parse(q['after']!);
+        final rows = after == null ? transcript : transcript.where((m) => (m['i'] as int) > after).toList();
+        return {'agent': 'a@m', 'session_id': 's', 'messages': rows, 'next': transcript.last['i'] as int};
+      },
+      'POST /v1/prompt': (b, _) {
+        sent = b;
+        transcript = [...transcript, {'i': 2, 'role': 'user',
+          'text': 'what is this?\n\n[Attached image: /home/x/.cache/roster/uploads/a/20261027-134453-1-cat.jpg]'}];
+        return {'ok': true};
+      },
+    });
+    final c = Conversation(hub.client(Uri.parse('https://hub'), 'tok-1'), 'a@m');
+    await c.loadTail();
+    final bytes = Uint8List.fromList([0xff, 0xd8, 0xff, 1, 2, 3]);
+    final sending = c.send('what is this?', images: [('cat.jpg', bytes)]);
+    expect(c.pending, ['what is this?\n📷 1 photo']);
+    await sending;
+    expect(c.pending, isEmpty);
+    final images = sent!['images'] as List;
+    expect(images.single['name'], 'cat.jpg');
+    expect(base64Decode(images.single['data'] as String), bytes);
+    expect(UserBubble.shown(c.messages.last.text), 'what is this?\n\n📷 cat.jpg');
   });
 }

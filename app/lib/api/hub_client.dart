@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:typed_data';
 
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
@@ -122,8 +123,18 @@ class HubClient {
   Future<Screen> screen(String agent) async =>
       Screen.fromJson(await _send('GET', '/v1/screen', query: {'agent': agent}));
 
-  Future<void> prompt(String agent, String text) =>
-      _send('POST', '/v1/prompt', body: {'agent': agent, 'text': text});
+  /// A prompt; [images] (name, bytes) go along and are kept on the agent's
+  /// machine, the prompt naming their paths.
+  Future<void> prompt(String agent, String text, {List<(String, Uint8List)> images = const []}) => _send(
+        'POST',
+        '/v1/prompt',
+        body: {
+          'agent': agent,
+          'text': text,
+          if (images.isNotEmpty) 'images': [for (final (name, bytes) in images) {'name': name, 'data': base64Encode(bytes)}],
+        },
+        timeout: images.isEmpty ? _timeout : const Duration(seconds: 90),
+      );
 
   Future<void> keys(String agent, List<String> keys) =>
       _send('POST', '/v1/keys', body: {'agent': agent, 'keys': keys});

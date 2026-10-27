@@ -2991,9 +2991,52 @@ def live_tmux(name):
     return e, a
 
 
+UPLOADS = os.path.join(CACHE, "uploads")
+UPLOAD_TYPES = (".jpg", ".jpeg", ".png", ".gif", ".webp")
+UPLOAD_MAX = 10 * 1024 * 1024
+
+
+def save_uploads(name, files):
+    """Files sent along with a prompt ({"name", "data": base64}), kept on the
+    agent's machine; returns their paths, for the prompt to name."""
+    import base64
+    d = os.path.join(UPLOADS, name.replace("/", "%"))
+    os.makedirs(d, exist_ok=True)
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    paths = []
+    for k, f in enumerate(files):
+        base = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(str(f.get("name") or "image")))[-60:] or "image"
+        if not base.lower().endswith(UPLOAD_TYPES):
+            raise Fail("%s: only images are taken (%s)" % (base, " ".join(UPLOAD_TYPES)))
+        try:
+            raw = base64.b64decode(f.get("data") or "", validate=True)
+        except (ValueError, TypeError):
+            raise Fail("%s: not base64" % base)
+        if not raw or len(raw) > UPLOAD_MAX:
+            raise Fail("%s: empty, or over %d MB" % (base, UPLOAD_MAX // (1024 * 1024)))
+        path = os.path.join(d, "%s-%d-%s" % (stamp, k + 1, base))
+        with open(path, "wb") as out:
+            out.write(raw)
+        paths.append(path)
+    return paths
+
+
+def with_uploads(name, data):
+    """The prompt's text with the paths of the files sent along, saved here first."""
+    data = data or {}
+    text = (data.get("text") or "").rstrip()
+    files = data.get("files") or []
+    if not files:
+        return text
+    lines = ["[Attached image: %s]" % p for p in save_uploads(name, files)]
+    return (text + "\n\n" if text else "") + "\n".join(lines)
+
+
 def view_local(verb, name, args, data=None):
     """transcript/screen/prompt/keys for an agent on this machine; returns the JSON answer."""
     agent = "%s@%s" % (name, machine())
+    if verb == "prompt" and (data or {}).get("files"):
+        data = dict(data, text=with_uploads(name, data), files=None)
     if verb == "transcript":
         e = load(name)
         if not e or not e.get("session_id"):
@@ -3110,7 +3153,17 @@ def cmd_view(args):
     elif verb == "keys":
         opts = {"keys": args.keys}
     elif verb == "prompt":
+        import base64
         data = {"text": sys.stdin.read() if args.text in (None, "-") else args.text}
+        files = []
+        for path in args.with_files or []:
+            try:
+                with open(path, "rb") as f:
+                    files.append({"name": os.path.basename(path), "data": base64.b64encode(f.read()).decode()})
+            except OSError as exc:
+                raise Fail("%s: %s" % (path, exc.strerror or exc))
+        if files:
+            data["files"] = files
     elif verb == "answer":
         if not re.fullmatch(r"\d{1,2}", args.option):
             raise Fail("option is the number of the dialog's free-text option")
@@ -4021,6 +4074,8 @@ def main():
     s = sub.add_parser("prompt", help="type a prompt into an agent as the user")
     s.add_argument("agent")
     s.add_argument("text", nargs="?", help="the prompt, or - / omitted for stdin")
+    s.add_argument("--with", dest="with_files", action="append", metavar="IMAGE",
+                   help="send an image along (again for more): kept on the agent's machine, its path in the prompt")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_view)
 
