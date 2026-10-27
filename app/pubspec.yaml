@@ -1,7 +1,7 @@
 name: roster
 description: "Phone app for roster-hub: the roster's agents, their conversations and dialogs."
 publish_to: 'none'
-version: 0.4.2+4
+version: 0.4.3+5
 
 environment:
   sdk: ^3.13.5

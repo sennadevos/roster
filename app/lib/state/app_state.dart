@@ -87,10 +87,19 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   bool updateReady = false;
   String? _webBuild;
 
+  /// This Android build's number (tool/release.sh passes it in); 0 in a
+  /// development build, which never offers an update.
+  static const appBuild = int.fromEnvironment('ROSTER_BUILD');
+
+  /// A newer Android build the hub serves: its version and where to get it.
+  ({String version, Uri url})? apkUpdate;
+
   /// Asks the hub which web build it serves; a change means this page is old.
   Future<void> checkForUpdate() async {
     final c = client;
-    if (!kIsWeb || c == null || updateReady) return;
+    if (c == null) return;
+    if (!kIsWeb) return _checkApk(c);
+    if (updateReady) return;
     try {
       final web = (await c.version())['web'];
       if (web is! String) return;
@@ -100,6 +109,20 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
         updateReady = true;
         notifyListeners();
       }
+    } catch (_) {
+      // The hub being away is shown elsewhere.
+    }
+  }
+
+  Future<void> _checkApk(HubClient c) async {
+    if (appBuild == 0) return;
+    try {
+      final apk = (await c.version())['apk'];
+      if (apk is! Map || apk['build'] is! num || (apk['build'] as num) <= appBuild) return;
+      final url = hubUrl.resolve('${apk['path'] ?? 'roster.apk'}');
+      if (apkUpdate?.url == url && apkUpdate?.version == '${apk['version']}') return;
+      apkUpdate = (version: '${apk['version']}', url: url);
+      notifyListeners();
     } catch (_) {
       // The hub being away is shown elsewhere.
     }

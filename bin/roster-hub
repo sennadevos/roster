@@ -927,7 +927,15 @@ class Handler(http.server.BaseHTTPRequestHandler):
             web = str(int(os.path.getmtime(os.path.join(os.path.expanduser(self.hub.cfg["web_dir"]), "main.dart.js"))))
         except OSError:
             web = None
-        return {"hub": VERSION, "api": API, "web": web}
+        # The Android APK served beside it (roster.apk), as tool/publish-apk.sh
+        # describes it in roster.apk.json, so the app can offer its own update.
+        try:
+            with open(os.path.join(os.path.expanduser(self.hub.cfg["web_dir"]), "roster.apk.json")) as f:
+                apk = json.load(f)
+            apk = {"version": str(apk["version"]), "build": int(apk["build"]), "path": "roster.apk"}
+        except (OSError, ValueError, KeyError, TypeError):
+            apk = None
+        return {"hub": VERSION, "api": API, "web": web, "apk": apk}
 
     def r_pair(self):
         addr = self.client()

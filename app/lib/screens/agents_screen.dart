@@ -45,11 +45,10 @@ class _AgentsScreenState extends State<AgentsScreen> {
     super.initState();
     _search.addListener(() => setState(() {}));
     installCopyKey();
-    if (kIsWeb) {
-      // Note the build now, then look for a newer one every two minutes.
-      WidgetsBinding.instance.addPostFrameCallback((_) => AppScope.read(context).checkForUpdate());
-      _updates = Timer.periodic(const Duration(minutes: 2), (_) => AppScope.read(context).checkForUpdate());
-    }
+    // Look for a newer build now, then every so often: the web app every two
+    // minutes (it only reloads), the Android app every two hours (an APK).
+    WidgetsBinding.instance.addPostFrameCallback((_) => AppScope.read(context).checkForUpdate());
+    _updates = Timer.periodic(Duration(minutes: kIsWeb ? 2 : 120), (_) => AppScope.read(context).checkForUpdate());
   }
 
   Timer? _updates;
@@ -495,6 +494,12 @@ class _AgentList extends StatelessWidget {
               leading: const Icon(Icons.system_update_alt),
               content: const Text('Roster was updated.'),
               actions: [TextButton(onPressed: reloadPage, child: const Text('Reload'))],
+            ),
+          if (app.apkUpdate case final u?)
+            MaterialBanner(
+              leading: const Icon(Icons.system_update_alt),
+              content: Text('Roster ${u.version} is ready. Android asks you to confirm the install.'),
+              actions: [TextButton(onPressed: () => openLink(u.url), child: const Text('Update'))],
             ),
           if (app.haveSnapshot && app.link != Link.live)
             Delayed(

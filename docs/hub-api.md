@@ -65,7 +65,7 @@ Runs as the user unit `roster-hub.service` (written by `roster install --hub`), 
 
 | Method and path | Body / query | Answer |
 |---|---|---|
-| `GET /v1/version` | | `{"hub": "0.3.0", "api": 1}` |
+| `GET /v1/version` | | `{"hub": "0.3.0", "api": 1, "web": "<build id>", "apk": {"version", "build", "path": "roster.apk"} or null}`; `apk` is the Android build served at `/roster.apk`, so the app can offer to update itself |
 | `POST /v1/pair` | `{"code", "device_name"}` | `{"token", "device_id"}` |
 | `GET /v1/agents` | `?all=1` for gone ones too | `{"agents": [row…], "machines": [{"name", "local": bool, "reachable": bool, "error"}]}`; a row is a `roster list --json` row plus `"agent": "name@machine"`; a live row has `subagents`: `[{"id", "type", "label", "status": "running"|"done", "started_at", "ended_at"}]`, the subagents it runs (shown under it, never as agents; finished ones stay two minutes) |
 | `GET /v1/transcript` | `?agent=&after=&before=&limit=` | as `roster transcript --json` |

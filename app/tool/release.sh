@@ -13,6 +13,8 @@ base64 -d "$secrets/roster-app-keystore" > "$tmp/roster.jks"
 ROSTER_KEYSTORE_HOST="$tmp/roster.jks"
 ROSTER_KEYSTORE_PASSWORD=$(cat "$secrets/roster-app-keystore-password")
 export ROSTER_KEYSTORE_HOST ROSTER_KEYSTORE_PASSWORD
-"$here/tool/flutter.sh" flutter build apk --release "$@"
+# The app knows its own build number, to tell when the hub serves a newer one.
+build=$(sed -n 's/^version: .*+\([0-9][0-9]*\)$/\1/p' "$here/pubspec.yaml")
+"$here/tool/flutter.sh" flutter build apk --release --dart-define=ROSTER_BUILD="$build" "$@"
 apk="$here/build/app/outputs/flutter-apk/app-release.apk"
 echo "signed: $apk ($(du -h "$apk" | cut -f1))"

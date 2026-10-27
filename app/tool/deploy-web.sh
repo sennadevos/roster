@@ -15,7 +15,7 @@ tar -C "$here/build/web" -czf - . | ssh "$target" '
     rm -rf "$d/web.new"; mkdir "$d/web.new"
     tar -xzf - -C "$d/web.new"
     # The Android APK sits beside the web app (roster.apk); keep it.
-    [ -f "$d/web/roster.apk" ] && cp -p "$d/web/roster.apk" "$d/web.new/"
+    for f in roster.apk roster.apk.json; do [ -f "$d/web/$f" ] && cp -p "$d/web/$f" "$d/web.new/"; done
     rm -rf "$d/web.old"
     [ -d "$d/web" ] && mv "$d/web" "$d/web.old"
     mv "$d/web.new" "$d/web"
