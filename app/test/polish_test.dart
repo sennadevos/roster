@@ -452,6 +452,47 @@ void main() {
     await hub.events.close();
     await tester.pump();
   });
+
+  testWidgets('agents named print-lab/... sit in a print-lab folder, print-lab itself first and marked main', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final hub = FakeHub({});
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({
+      'agents': [
+        row('print-lab/scraper', 'srv', 'idle'),
+        row('infra', 'srv', 'idle'),
+        row('print-lab', 'srv', 'idle'),
+        row('print-lab/fans', 'srv', 'idle'),
+      ],
+      'machines': machines,
+    });
+    await tester.pump();
+    await tester.pumpAndSettle();
+
+    // One folder, the lone agent without one.
+    expect(find.byIcon(Icons.folder_open_outlined), findsOneWidget);
+    final tiles = tester.widgetList<AgentTile>(find.byType(AgentTile)).toList();
+    final inFolder = tiles.where((t) => t.agent.name.startsWith('print-lab')).toList();
+    expect(inFolder.map((t) => t.agent.name), ['print-lab', 'print-lab/fans', 'print-lab/scraper']);
+    expect(inFolder.first.main, isTrue);
+    expect(inFolder.skip(1).every((t) => !t.main), isTrue);
+    expect(find.text('main'), findsOneWidget);
+
+    // Folded shut: its agents go, the others stay.
+    await tester.tap(find.byIcon(Icons.folder_open_outlined));
+    await tester.pumpAndSettle();
+    expect(tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name), ['infra']);
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
 }
 
 /// For screens with a spinner, which never settles: pump long enough for

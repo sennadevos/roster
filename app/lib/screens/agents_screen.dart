@@ -267,6 +267,100 @@ class _ListModel {
   late final List<Agent> order;
 }
 
+/// Folders the user folded shut, by place and name ("srv/print-lab"); for as
+/// long as the app runs.
+final _foldedShut = ValueNotifier<Set<String>>({});
+
+/// Agents with folders: every `x/...` agent sits in a folder `x`, and an
+/// agent named `x` itself goes first in it, marked main. Agents without a `/`
+/// that nothing sits under stay as they are. With [recent], a folder takes
+/// the place of its most recently active agent.
+List<Widget> _foldered(List<Agent> agents, String scope, Widget Function(Agent a, {int? level, bool main}) tile,
+    {bool recent = false}) {
+  final byTop = <String, List<Agent>>{};
+  for (final a in agents) {
+    byTop.putIfAbsent(a.name.split('/').first, () => []).add(a);
+  }
+  final epoch = DateTime.fromMillisecondsSinceEpoch(0);
+  DateTime latest(List<Agent> l) => l.map((a) => a.statusAt ?? epoch).reduce((x, y) => x.isAfter(y) ? x : y);
+  final tops = byTop.keys.toList();
+  if (recent) tops.sort((x, y) => latest(byTop[y]!).compareTo(latest(byTop[x]!)));
+  final out = <Widget>[];
+  for (final top in tops) {
+    final members = byTop[top]!;
+    if (!members.any((a) => a.name.contains('/'))) {
+      out.addAll(members.map((a) => tile(a)));
+      continue;
+    }
+    final key = '$scope/$top';
+    final shut = _foldedShut.value.contains(key);
+    final rest = members.where((a) => a.name != top).toList()
+      ..sort(recent
+          ? (x, y) => (y.statusAt ?? epoch).compareTo(x.statusAt ?? epoch)
+          : (x, y) => x.name.compareTo(y.name));
+    out.add(_FolderHeader(
+      name: top,
+      count: members.length,
+      shut: shut,
+      busy: members.any((a) => a.status == 'working'),
+      onTap: () {
+        final next = {..._foldedShut.value};
+        if (!next.remove(key)) next.add(key);
+        _foldedShut.value = next;
+      },
+    ));
+    if (!shut) {
+      out.addAll([
+        for (final a in members.where((a) => a.name == top)) tile(a, level: 1, main: true),
+        for (final a in rest) tile(a, level: a.depth),
+      ]);
+    }
+  }
+  return out;
+}
+
+/// A folder of agents named `name/...`; a tap folds it shut or open.
+class _FolderHeader extends StatelessWidget {
+  const _FolderHeader(
+      {required this.name, required this.count, required this.shut, required this.busy, required this.onTap});
+
+  final String name;
+  final int count;
+  final bool shut;
+  final bool busy;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
+          child: Row(children: [
+            Icon(shut ? Icons.folder_outlined : Icons.folder_open_outlined, size: 18, color: cs.onSurfaceVariant),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Text(name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700, color: cs.onSurface)),
+            ),
+            if (busy && shut) ...[const RunningSpinner(size: 11), const SizedBox(width: 8)],
+            Text('$count', style: theme.textTheme.labelMedium?.copyWith(color: cs.outline)),
+            const SizedBox(width: 4),
+            Icon(shut ? Icons.expand_more : Icons.expand_less, size: 18, color: cs.outline),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
 class _AgentList extends StatelessWidget {
   const _AgentList({
     this.selected,
@@ -332,15 +426,19 @@ class _AgentList extends StatelessWidget {
         onAction: search.clear,
       );
     } else {
-      Widget tile(Agent a, {bool showMachine = false, bool indent = true}) => AgentTile(
+      Widget tile(Agent a, {bool showMachine = false, bool indent = true, int? level, bool main = false}) => AgentTile(
             a,
             key: rowKey(a.id),
             selected: a.id == selected,
             cursor: a.id == cursor,
             showMachine: showMachine,
             indent: indent && !model.searching,
+            level: level,
+            main: main,
           );
-      body = ListView(
+      body = ValueListenableBuilder(
+        valueListenable: _foldedShut,
+        builder: (context, _, _) => ListView(
         padding: EdgeInsets.only(bottom: wide ? 24 : 96, top: 4),
         children: [
           if (model.needs.isNotEmpty) ...[
@@ -360,7 +458,9 @@ class _AgentList extends StatelessWidget {
                 title: 'By last activity',
                 count: model.recentAgents.length,
               ),
-            for (final a in model.recentAgents) tile(a, showMachine: true, indent: false),
+            ..._foldered(model.recentAgents, 'recent',
+                (Agent a, {int? level, bool main = false}) => tile(a, showMachine: true, level: level ?? 0, main: main),
+                recent: true),
           ] else
           for (final (machine, agents) in model.groups) ...[
             _MachineHeader(machine, count: agents.length),
@@ -372,7 +472,8 @@ class _AgentList extends StatelessWidget {
                   style: theme.textTheme.bodySmall?.copyWith(color: cs.outline),
                 ),
               ),
-            for (final a in agents) tile(a),
+            ..._foldered(agents, machine.name,
+                (Agent a, {int? level, bool main = false}) => tile(a, level: level, main: main)),
           ],
           if (model.parked.isNotEmpty)
             Theme(
@@ -385,10 +486,12 @@ class _AgentList extends StatelessWidget {
                     style: theme.textTheme.labelLarge?.copyWith(color: cs.outline)),
                 subtitle: Text('No process running; you can read them, and sending one a message resumes it.',
                     style: theme.textTheme.bodySmall?.copyWith(color: cs.outline)),
-                children: [for (final a in model.parked) tile(a, showMachine: true, indent: false)],
+                children: _foldered(model.parked, 'parked',
+                    (Agent a, {int? level, bool main = false}) => tile(a, showMachine: true, level: level ?? 0, main: main)),
               ),
             ),
         ],
+        ),
       );
     }
 
@@ -710,13 +813,25 @@ class _MachineHeader extends StatelessWidget {
 /// in this status, unread mail, an API error, and its subagents.
 class AgentTile extends StatelessWidget {
   const AgentTile(this.agent,
-      {super.key, this.selected = false, this.cursor = false, this.showMachine = false, this.indent = true});
+      {super.key,
+      this.selected = false,
+      this.cursor = false,
+      this.showMachine = false,
+      this.indent = true,
+      this.level,
+      this.main = false});
 
   final Agent agent;
   final bool selected;
   final bool cursor;
   final bool showMachine;
   final bool indent;
+
+  /// How far in it sits, when not by its own depth (inside a folder).
+  final int? level;
+
+  /// The agent whose name is its folder's: shown first, marked main.
+  final bool main;
 
   @override
   Widget build(BuildContext context) {
@@ -763,7 +878,7 @@ class AgentTile extends StatelessWidget {
             child: Opacity(
               opacity: dim ? 0.55 : 1,
               child: Padding(
-                padding: EdgeInsets.fromLTRB(12 + (indent ? a.depth * 14.0 : 0), 9, 12, 9),
+                padding: EdgeInsets.fromLTRB(12 + (indent ? (level ?? a.depth) * 14.0 : 0), 9, 12, 9),
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
@@ -795,6 +910,7 @@ class AgentTile extends StatelessWidget {
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
+                              if (main) ...[const SizedBox(width: 6), Tag('main', color: cs.primary)],
                               if (a.temp) ...[const SizedBox(width: 6), const Tag('quick')],
                               const SizedBox(width: 8),
                               if (a.unread > 0) ...[UnreadPill(a.unread), const SizedBox(width: 8)],
