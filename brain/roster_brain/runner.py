@@ -355,7 +355,9 @@ class Runner:
         self.status = status
         fields = dict(extra)
         if changed:
-            fields.update(status=status, status_at=now())
+            # Also after a crash: Claude's SessionEnd hook may have marked it
+            # gone in between, and a live agent has no end.
+            fields.update(status=status, status_at=now(), ended_at=None, end_reason=None)
         if fields:
             update_entry(self.sid, **fields)
         self.draw_status()
