@@ -990,6 +990,7 @@ def cmd_rename(args):
         if args.role:
             e["role"] = args.role
             e.pop("scratch", None)
+            e.pop("drift", None)  # a new role is unjudged until Jev looks again
             save(e)
             print("%s: role updated" % new)
         else:
@@ -1011,6 +1012,7 @@ def cmd_rename(args):
     os.replace(agent_dir(old), agent_dir(new))
     e["name"] = new
     e.pop("scratch", None)
+    e.pop("drift", None)  # a new name is unjudged until Jev looks again
     kept = ""
     if e.pop("temp", None) and backend(e) == "tmux":
         # A named agent is kept: its window closing detaches it again.
