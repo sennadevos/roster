@@ -356,6 +356,7 @@ class ClaudeChat(ChatProvider):
             permission_mode="dontAsk",
             setting_sources=[],
             include_partial_messages=True,
+            max_buffer_size=64 * 1024 * 1024,  # messages with images
             max_turns=1,
             effort="low" if model and "haiku" in model else None,
         )
@@ -383,6 +384,7 @@ class ClaudeAgent(AgentSession):
             permission_mode=permission_mode,
             setting_sources=["user", "project", "local"],
             include_partial_messages=True,
+            max_buffer_size=64 * 1024 * 1024,  # messages with images
             resume=resume,
         )
         self._session = _Session(options)

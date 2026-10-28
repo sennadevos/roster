@@ -59,6 +59,7 @@ AGENTS = os.path.join(STATE, "agents")
 SESSIONS = os.path.join(STATE, "sessions")
 EFFORTS = ("low", "medium", "high", "xhigh", "max")
 REVIVE_MAX = 5
+MAX_BUFFER = 64 * 1024 * 1024
 SCREEN_LINES = 60
 
 
@@ -564,6 +565,9 @@ class Runner:
             setting_sources=["user", "project", "local"],
             system_prompt={"type": "preset", "preset": "claude_code"},
             include_partial_messages=True,
+            # One message from the CLI can carry images (a Read of screenshots);
+            # the SDK's 1 MiB default then ends the session.
+            max_buffer_size=MAX_BUFFER,
             can_use_tool=self.can_use_tool,
             stderr=lambda line: None,
         )
