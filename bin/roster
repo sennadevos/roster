@@ -60,6 +60,33 @@ import os
 import sys
 
 
+def _turn_due(state, adir):
+    """Count a turn (a prompt the agent gets); True on every drift_every-th.
+
+    drift_every is in <state>/drift-every, written by `roster install`; no
+    file or 0 is no counting. Plain os only: this runs on every prompt.
+    """
+    try:
+        with open(os.path.join(state, "drift-every")) as f:
+            every = int(f.read().strip() or 0)
+    except (OSError, ValueError):
+        return False
+    if every <= 0:
+        return False
+    path = os.path.join(adir, "turns")
+    try:
+        with open(path) as f:
+            n = int(f.read().strip() or 0) + 1
+    except (OSError, ValueError):
+        n = 1
+    try:
+        with open(path, "w") as f:
+            f.write("%d\n" % n)
+    except OSError:
+        return False
+    return n % every == 0
+
+
 def _hook_fast_path():
     """Exit before the real imports when a hook has nothing to do.
 
@@ -92,6 +119,10 @@ def _hook_fast_path():
         if not name:
             sys.exit(0)
         adir = os.path.join(state, "agents", name.replace("/", "%"))
+        if event == "UserPromptSubmit" and _turn_due(state, adir):
+            os.environ["ROSTER_DRIFT_DUE"] = "1"  # the full path starts a drift check
+            sys.stdin = __import__("io").StringIO(raw)
+            return
         work = event in ("SubagentStart", "SubagentStop") or (
             event in ("Stop", "PostToolUse", "UserPromptSubmit") and os.listdir(os.path.join(adir, "inbox", "new")))
         if not work and event in ("UserPromptSubmit", "Stop", "StopFailure", "Notification",
@@ -1561,6 +1592,21 @@ def decisions(state, questions):
         raise Fail("Jev did not answer: %s" % exc)
 
 
+def decisions_anywhere(state, questions):
+    """decisions() here, or on a peer that has the OpenRouter key."""
+    got = decisions(state, questions)
+    if got is not None:
+        return got
+    for m in peers():
+        try:
+            got = rpc(m, "decisions", data={"state": state, "questions": questions}, timeout=40)
+        except Fail:
+            continue
+        if got.get("answers"):
+            return got
+    raise Fail("no OpenRouter key here (%s) or on a reachable peer to ask Jev with" % short_path(OPENROUTER_KEY))
+
+
 def jev_local(text, agents):
     """Ask Jev with this machine's OpenRouter key; None when there is none here."""
     criteria = {a["agent"]: a["role"] + (" (parked)" if a.get("status") == PARKED else "") for a in agents}
@@ -1630,11 +1676,14 @@ def cmd_capture(args):
 
 # --- drift: do an agent's name and role still fit its conversation? ----------
 #
-# A test: every `drift_every` (10) messages from the user to an agent, Jev is
-# asked whether its name and role still describe what the conversation is
-# about. Below `drift_below` (0.35) the agent is flagged (`drift` in its entry:
-# list and app show it); nothing else happens, and a later check that fits
-# clears it. Each check is logged with Jev's cost, for `roster drift --report`.
+# A test: on every `drift_every`-th turn of an agent (10; each prompt it gets,
+# counted by its UserPromptSubmit hook), Jev is asked whether its name and role
+# still describe what the conversation is about; `roster drift` without an
+# agent sweeps every agent with that many new messages from the user. Below
+# `drift_below` (0.35) the agent is flagged (`drift` in its entry: list and
+# app show it); nothing else happens, and a later check that fits, or a new
+# name or role, clears it. Each check is logged with Jev's cost, on the
+# agent's machine; `roster drift --report` adds up every machine's.
 
 DRIFT_STATE = os.path.join(STATE, "drift.json")
 DRIFT_LOG = os.path.join(STATE, "drift-log.jsonl")
@@ -1674,7 +1723,9 @@ def cmd_drift(args):
             seen = json.load(f)
     except (OSError, ValueError):
         seen = {}
-    rows, _ = list_rows(argparse.Namespace(all=False, filter=None))
+    # One agent of this machine (its drift_every-th turn): no need to ask the peers.
+    local_only = bool(args.agent) and "@" not in args.agent
+    rows, _ = list_rows(argparse.Namespace(all=False, filter=None), remote=not local_only)
     rows = [r for r in rows if not r.get("stale") and r.get("status") not in ENDED]
     if args.agent:
         rows = [r for r in rows if "%s@%s" % (r["name"], r["machine"]) == args.agent or r["name"] == args.agent]
@@ -1696,9 +1747,7 @@ def cmd_drift(args):
         if args.dry_run:
             print("%s: would ask (%d new messages from the user)" % (agent, len(new)))
             continue
-        answer = decisions(state, questions)
-        if answer is None:
-            raise Fail("no OpenRouter key here (%s): run drift where it is" % short_path(OPENROUTER_KEY))
+        answer = decisions_anywhere(state, questions)
         fits = float(((answer.get("answers") or {}).get("fits") or {}).get("noul") or 0)
         usage = answer.get("usage") or {}
         flag = {"fits": round(fits, 2), "at": now()} if fits < below else None
@@ -1715,12 +1764,23 @@ def cmd_drift(args):
     write_atomic(DRIFT_STATE, json.dumps(seen, indent=1))
 
 
-def drift_report():
+def drift_lines():
     try:
         with open(DRIFT_LOG) as f:
-            lines = [json.loads(l) for l in f if l.strip()]
-    except OSError:
-        lines = []
+            return [json.loads(l) for l in f if l.strip()]
+    except (OSError, ValueError):
+        return []
+
+
+def drift_report():
+    """The checks of this machine and every reachable peer, and what Jev cost."""
+    lines = drift_lines()
+    for m in peers():
+        try:
+            lines += rpc(m, "drift-log", timeout=20).get("lines") or []
+        except Fail:
+            print("(@%s did not answer; its checks are not counted)" % m)
+    lines.sort(key=lambda l: l.get("at") or "")
     if not lines:
         print("no drift checks yet")
         return
@@ -3368,6 +3428,11 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"), opt("--harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "decisions":
+            p = json.load(sys.stdin)
+            out = decisions(p["state"], p["questions"]) or {"error": "no OpenRouter key on %s" % machine()}
+        elif verb == "drift-log":
+            out = {"lines": drift_lines()}
         elif verb == "flag":
             p = json.load(sys.stdin)
             set_drift(check_name(p["name"]), None, p.get("drift"))
@@ -3692,28 +3757,6 @@ Persistent=true
 WantedBy=timers.target
 """
 
-DRIFT_SERVICE = """[Unit]
-Description=Ask Jev whether roster agents' names and roles still fit their conversations
-
-[Service]
-# Written by `roster install` where config.toml sets drift_every (the machine
-# with the OpenRouter key); `roster drift --report` shows what it found and cost.
-Type=oneshot
-ExecStart=%(bin)s/roster drift
-"""
-
-DRIFT_TIMER = """[Unit]
-Description=Ask Jev about roster agents' names and roles, hourly
-
-[Timer]
-OnCalendar=hourly
-RandomizedDelaySec=300
-Persistent=true
-
-[Install]
-WantedBy=timers.target
-"""
-
 TRAY_SERVICE = """[Unit]
 Description=Agent roster tray menu
 PartOf=graphical-session.target
@@ -3831,10 +3874,8 @@ def cmd_install(args):
                 # e.g. ~/.claude/skills is a symlink to a folder that is not there
                 done.append("skipped  %s (%s); agents here lack the roster skill" % (
                     short_path(skill), exc.strerror or exc))
-    drift = bool(config().get("drift_every"))
-    if drift:
-        done.append(put(os.path.join(units, "roster-drift.service"), DRIFT_SERVICE % {"bin": HOME_BIN}, args.check))
-        done.append(put(os.path.join(units, "roster-drift.timer"), DRIFT_TIMER, args.check))
+    # Drift checks go by turns, counted in the hooks (drift_every, default 10; 0 is off).
+    done.append(put(os.path.join(STATE, "drift-every"), "%d\n" % int(config().get("drift_every", 10)), args.check))
     if args.tray:
         done.append(put(os.path.join(units, "roster-tray.service"),
                         TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
@@ -3850,7 +3891,14 @@ def cmd_install(args):
         run(["systemctl", "--user", "enable", "--now", "roster-park.timer"])
     else:
         run(["systemctl", "--user", "disable", "--now", "roster-park.timer"])
-    run(["systemctl", "--user", "enable" if drift else "disable", "--now", "roster-drift.timer"])
+    # The hourly drift timer of before: gone, the hooks start the checks now.
+    if os.path.exists(os.path.join(units, "roster-drift.timer")):
+        run(["systemctl", "--user", "disable", "--now", "roster-drift.timer"])
+        for unit in ("roster-drift.timer", "roster-drift.service"):
+            try:
+                os.remove(os.path.join(units, unit))
+            except OSError:
+                pass
     if args.tray:
         run(["systemctl", "--user", "enable", "roster-tray.service"])
         run(["systemctl", "--user", "restart", "roster-tray.service"])
@@ -4086,6 +4134,11 @@ def cmd_hook(args):
     name = name_for_session(session_id)
     if not name:
         return
+    if event == "UserPromptSubmit" and os.environ.pop("ROSTER_DRIFT_DUE", None):
+        # Its drift_every-th turn: a drift check, detached, so the prompt does not wait.
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "drift", name],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
 
     if event == "SessionEnd":
         shutil.rmtree(os.path.join(agent_dir(name), "subagents"), ignore_errors=True)
