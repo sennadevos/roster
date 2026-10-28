@@ -1159,6 +1159,9 @@ def render_list(rows, color=False, width=None):
                 head += "  " + paint("1;31", "⚠ API error (%s); needs you" % st["error"])
         lines.append(head)
         indent = pad + "  "
+        if e.get("drift") and not ended:
+            lines.append(indent + paint("1;33", "⚑ name and role may not fit the conversation anymore (Jev %.2f)"
+                                         % e["drift"].get("fits", 0)))
         role = e.get("role") or "-"
         if width is None:
             lines.append(indent + role)
@@ -1535,28 +1538,36 @@ def capture_agents():
             for r in rows if r.get("status") not in ENDED and not r.get("stale")]
 
 
-def jev_local(text, agents):
-    """Ask Jev with this machine's OpenRouter key; None when there is none here."""
+def decisions(state, questions):
+    """One request to Jev (OpenRouter's Decisions API) with this machine's
+    OpenRouter key: the whole answer, with `usage` (tokens, cost in USD).
+    None when this machine has no key."""
     import urllib.request
     try:
         with open(OPENROUTER_KEY) as f:
             key = f.read().strip()
     except OSError:
         return None
-    criteria = {a["agent"]: a["role"] + (" (parked)" if a.get("status") == PARKED else "") for a in agents}
-    criteria["new"] = "None of the agents above: this needs a new agent of its own"
-    body = {"model": config().get("jev_model") or "~typesafe/jev-latest", "state": {"thought": text},
-            "questions": {"agent": {"type": "choice", "criteria": criteria, "instructions":
-                          "The user said this thought out loud. Which agent's work does it belong to? Pick the agent "
-                          "whose role it fits; pick new when none of them works on this."}}}
+    body = {"model": config().get("jev_model") or "~typesafe/jev-latest", "state": state, "questions": questions}
     req = urllib.request.Request(DECISIONS_URL, data=json.dumps(body).encode(), headers={
         "Authorization": "Bearer " + key, "Content-Type": "application/json",
-        "HTTP-Referer": "https://github.com/sennadevos/roster", "X-Title": "roster capture"})
+        "HTTP-Referer": "https://github.com/sennadevos/roster", "X-Title": "roster"})
     try:
         with urllib.request.urlopen(req, timeout=30) as r:
-            got = json.load(r)
+            return json.load(r)
     except (OSError, ValueError) as exc:
         raise Fail("Jev did not answer: %s" % exc)
+
+
+def jev_local(text, agents):
+    """Ask Jev with this machine's OpenRouter key; None when there is none here."""
+    criteria = {a["agent"]: a["role"] + (" (parked)" if a.get("status") == PARKED else "") for a in agents}
+    criteria["new"] = "None of the agents above: this needs a new agent of its own"
+    got = decisions({"thought": text}, {"agent": {"type": "choice", "criteria": criteria, "instructions":
+                    "The user said this thought out loud. Which agent's work does it belong to? Pick the agent "
+                    "whose role it fits; pick new when none of them works on this."}})
+    if got is None:
+        return None
     a = (got.get("answers") or {}).get("agent") or {}
     probs = sorted((a.get("probabilities") or {}).items(), key=lambda kv: -kv[1])
     return {"choice": a.get("choice"), "confidence": a.get("confidence") or 0,
@@ -1613,6 +1624,110 @@ def cmd_capture(args):
             ", ".join("%s %.2f" % (c["agent"], c["p"]) for c in decision["candidates"])))
     else:
         print("%s %s" % ("sent to" if out["action"] == "sent" else "started", out["agent"]))
+
+
+# --- drift: do an agent's name and role still fit its conversation? ----------
+#
+# A test: every `drift_every` (10) messages from the user to an agent, Jev is
+# asked whether its name and role still describe what the conversation is
+# about. Below `drift_below` (0.35) the agent is flagged (`drift` in its entry:
+# list and app show it); nothing else happens, and a later check that fits
+# clears it. Each check is logged with Jev's cost, for `roster drift --report`.
+
+DRIFT_STATE = os.path.join(STATE, "drift.json")
+DRIFT_LOG = os.path.join(STATE, "drift-log.jsonl")
+
+
+def drift_question(row, msgs):
+    convo = "\n".join("%s: %s" % (m["role"], m["text"][:400]) for m in msgs)
+    return ({"agent_name": row["name"], "agent_role": row.get("role") or "", "recent_conversation": convo},
+            {"fits": {"type": "noul", "instructions":
+                      "Do the agent's name and role still describe what the recent conversation is about? Yes if "
+                      "the work is the same project or a natural part of it; no if the conversation has moved to "
+                      "something the name and role do not cover."}})
+
+
+def set_drift(name, mach, flag):
+    """Put (or with None take off) an agent's drift flag, on its own machine."""
+    if mach in (None, machine()):
+        e = load(name)
+        if not e:
+            raise Fail("no agent named %s here" % name)
+        if flag is None:
+            e.pop("drift", None)
+        else:
+            e["drift"] = flag
+        save(e)
+    else:
+        rpc(mach, "flag", data={"name": name, "drift": flag})
+
+
+def cmd_drift(args):
+    if args.report:
+        return drift_report()
+    every = int(config().get("drift_every", 10))
+    below = float(config().get("drift_below", 0.35))
+    try:
+        with open(DRIFT_STATE) as f:
+            seen = json.load(f)
+    except (OSError, ValueError):
+        seen = {}
+    rows, _ = list_rows(argparse.Namespace(all=False, filter=None))
+    rows = [r for r in rows if not r.get("stale") and r.get("status") not in ENDED]
+    if args.agent:
+        rows = [r for r in rows if "%s@%s" % (r["name"], r["machine"]) == args.agent or r["name"] == args.agent]
+    for r in rows:
+        agent = "%s@%s" % (r["name"], r["machine"])
+        try:
+            got = view("transcript", agent, {"limit": 80})
+        except Fail as exc:
+            print("%s: no transcript (%s)" % (agent, exc))
+            continue
+        msgs = [m for m in got["messages"] if m["role"] in ("user", "assistant")]
+        mark = seen.get(agent) or {}
+        if mark.get("session") != got.get("session_id"):
+            mark = {"session": got.get("session_id"), "i": 0}
+        new = [m for m in msgs if m["role"] == "user" and m["i"] > mark["i"]]
+        if len(new) < every and not args.agent:
+            continue
+        state, questions = drift_question(r, msgs[-30:])
+        if args.dry_run:
+            print("%s: would ask (%d new messages from the user)" % (agent, len(new)))
+            continue
+        answer = decisions(state, questions)
+        if answer is None:
+            raise Fail("no OpenRouter key here (%s): run drift where it is" % short_path(OPENROUTER_KEY))
+        fits = float(((answer.get("answers") or {}).get("fits") or {}).get("noul") or 0)
+        usage = answer.get("usage") or {}
+        flag = {"fits": round(fits, 2), "at": now()} if fits < below else None
+        try:
+            set_drift(r["name"], r["machine"], flag)
+        except Fail as exc:
+            print("%s: not flagged (%s)" % (agent, exc))
+        seen[agent] = {"session": got.get("session_id"), "i": max([m["i"] for m in msgs] or [0])}
+        line = {"at": now(), "agent": agent, "fits": round(fits, 3), "flagged": flag is not None,
+                "input_tokens": usage.get("input_tokens"), "cost": usage.get("cost")}
+        with open(DRIFT_LOG, "a") as f:
+            f.write(json.dumps(line) + "\n")
+        print("%s: fits %.2f%s ($%.6f)" % (agent, fits, "  FLAGGED" if flag else "", usage.get("cost") or 0))
+    write_atomic(DRIFT_STATE, json.dumps(seen, indent=1))
+
+
+def drift_report():
+    try:
+        with open(DRIFT_LOG) as f:
+            lines = [json.loads(l) for l in f if l.strip()]
+    except OSError:
+        lines = []
+    if not lines:
+        print("no drift checks yet")
+        return
+    cost = sum(l.get("cost") or 0 for l in lines)
+    flagged = sum(1 for l in lines if l.get("flagged"))
+    print("%d checks since %s, %d flagged; Jev cost $%.4f in all, $%.6f a check" % (
+        len(lines), lines[0]["at"][:10], flagged, cost, cost / len(lines)))
+    for l in lines[-10:]:
+        print("  %s %-40s fits %.2f%s" % (l["at"][:16], l["agent"], l["fits"], "  flagged" if l["flagged"] else ""))
 
 
 def model_args(model, effort):
@@ -3251,6 +3366,10 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"), opt("--harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "flag":
+            p = json.load(sys.stdin)
+            set_drift(check_name(p["name"]), None, p.get("drift"))
+            out = {"ok": True}
         elif verb == "capture-decide":
             p = json.load(sys.stdin)
             out = jev_local(p["text"], p["agents"]) or {"choice": None, "error": "no OpenRouter key on %s" % machine()}
@@ -3571,6 +3690,28 @@ Persistent=true
 WantedBy=timers.target
 """
 
+DRIFT_SERVICE = """[Unit]
+Description=Ask Jev whether roster agents' names and roles still fit their conversations
+
+[Service]
+# Written by `roster install` where config.toml sets drift_every (the machine
+# with the OpenRouter key); `roster drift --report` shows what it found and cost.
+Type=oneshot
+ExecStart=%(bin)s/roster drift
+"""
+
+DRIFT_TIMER = """[Unit]
+Description=Ask Jev about roster agents' names and roles, hourly
+
+[Timer]
+OnCalendar=hourly
+RandomizedDelaySec=300
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+"""
+
 TRAY_SERVICE = """[Unit]
 Description=Agent roster tray menu
 PartOf=graphical-session.target
@@ -3688,6 +3829,10 @@ def cmd_install(args):
                 # e.g. ~/.claude/skills is a symlink to a folder that is not there
                 done.append("skipped  %s (%s); agents here lack the roster skill" % (
                     short_path(skill), exc.strerror or exc))
+    drift = bool(config().get("drift_every"))
+    if drift:
+        done.append(put(os.path.join(units, "roster-drift.service"), DRIFT_SERVICE % {"bin": HOME_BIN}, args.check))
+        done.append(put(os.path.join(units, "roster-drift.timer"), DRIFT_TIMER, args.check))
     if args.tray:
         done.append(put(os.path.join(units, "roster-tray.service"),
                         TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
@@ -3703,6 +3848,7 @@ def cmd_install(args):
         run(["systemctl", "--user", "enable", "--now", "roster-park.timer"])
     else:
         run(["systemctl", "--user", "disable", "--now", "roster-park.timer"])
+    run(["systemctl", "--user", "enable" if drift else "disable", "--now", "roster-drift.timer"])
     if args.tray:
         run(["systemctl", "--user", "enable", "roster-tray.service"])
         run(["systemctl", "--user", "restart", "roster-tray.service"])
@@ -4099,6 +4245,12 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="only say where Jev would send it")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_capture)
+
+    s = sub.add_parser("drift", help="ask Jev whether agents' names and roles still fit their conversations")
+    s.add_argument("agent", nargs="?", help="check this one now (name or name@machine), however few new messages")
+    s.add_argument("--dry-run", action="store_true", help="only say which agents are due")
+    s.add_argument("--report", action="store_true", help="what the checks found, and what Jev cost")
+    s.set_defaults(fn=cmd_drift)
 
     s = sub.add_parser("interrupt", help="stop an SDK agent's turn in progress")
     s.add_argument("agent")

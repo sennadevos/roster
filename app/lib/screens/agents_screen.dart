@@ -818,6 +818,22 @@ class AgentTile extends StatelessWidget {
                                 ),
                               ),
                             ),
+                          if (a.drift != null && !a.ended)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 3),
+                              child: Row(children: [
+                                Icon(Icons.flag_outlined, size: 14, color: sc.working),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(
+                                    'Name and role may not fit anymore',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(color: sc.working),
+                                  ),
+                                ),
+                              ]),
+                            ),
                           if (stalled != null)
                             Padding(
                               padding: const EdgeInsets.only(top: 3),

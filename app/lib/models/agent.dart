@@ -82,6 +82,7 @@ class Agent {
     this.effort,
     this.temp = false,
     this.harness,
+    this.drift,
     this.subagents = const [],
     required this.fingerprint,
   });
@@ -110,6 +111,10 @@ class Agent {
 
   /// What runs it: `sdk` (roster's Agent SDK runner) or `claude` (Claude Code).
   final String? harness;
+
+  /// Jev's score (0..1) when it judged that the name and role no longer fit
+  /// the conversation (`roster drift`); null when they fit, or never checked.
+  final double? drift;
 
   /// An SDK agent: its model and effort switch live, and it can be interrupted.
   bool get sdk => harness == 'sdk';
@@ -154,6 +159,9 @@ class Agent {
       effort: json['effort'] is String ? json['effort'] as String : null,
       temp: json['temp'] == true,
       harness: json['harness'] is String ? json['harness'] as String : null,
+      drift: json['drift'] is Map && (json['drift'] as Map)['fits'] is num
+          ? ((json['drift'] as Map)['fits'] as num).toDouble()
+          : null,
       subagents: Subagent.listFromJson(json['subagents']),
       fingerprint: jsonEncode(json),
     );

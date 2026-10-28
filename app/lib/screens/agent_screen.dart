@@ -922,6 +922,12 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
                         Tag([?r.model, ?r.effort].join(' · '), icon: Icons.memory, tooltip: 'Model and effort'),
                       if (r.cwd != null) Tag(_shortPath(r.cwd!), icon: Icons.folder_outlined, tooltip: r.cwd),
                       if (r.temp) const Tag('quick', icon: Icons.bolt),
+                      if (r.drift != null && !ended)
+                        Tag('name/role may not fit (Jev ${r.drift!.toStringAsFixed(2)})',
+                            icon: Icons.flag_outlined,
+                            color: statusColors(context).working,
+                            tooltip: 'Jev judged that the name and role no longer describe this conversation '
+                                '(roster drift). Only a flag: nothing was changed.'),
                     ])
                       Padding(padding: const EdgeInsets.only(right: 6), child: t),
                     for (final s in subs)
