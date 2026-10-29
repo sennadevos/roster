@@ -1792,6 +1792,71 @@ def drift_report():
         print("  %s %-40s fits %.2f%s" % (l["at"][:16], l["agent"], l["fits"], "  flagged" if l["flagged"] else ""))
 
 
+# --- goals: Senna's work packages, through wsw-roster's `goals` CLI -----------
+#
+# The goals live in wsw-roster's database on one machine, and only its `goals`
+# CLI touches them. roster only carries the call: `roster goals ARGS...` runs
+# `goals ARGS...` here when the CLI is here (or config.toml's goals_bin), else
+# on the first peer that has it, and hands back its stdout, stderr and exit
+# code untouched. The caller's roster name goes along as ROSTER_AGENT, so a
+# claim made from another machine names the right agent.
+
+
+def goals_bin():
+    exe = config().get("goals_bin")
+    if exe:
+        return os.path.expanduser(exe)
+    try:
+        return tool("goals")
+    except Fail:
+        return None
+
+
+def run_goals(argv, stdin_text, agent):
+    """The goals CLI here: {stdout, stderr, code}, or None when it is not here."""
+    exe = goals_bin()
+    if not exe:
+        return None
+    env = dict(os.environ)
+    if agent:
+        env["ROSTER_AGENT"] = agent
+    try:
+        proc = subprocess.run([exe] + [str(a) for a in argv], input=stdin_text, capture_output=True, text=True,
+                              timeout=90, env=env)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        raise Fail("goals: %s" % exc)
+    return {"stdout": proc.stdout, "stderr": proc.stderr, "code": proc.returncode}
+
+
+def cmd_goals(args):
+    argv = list(args.goal_args)
+    if argv[:1] == ["--"]:
+        argv = argv[1:]
+    # Long text comes as `-`; stdin is read only then, so nothing waits on it otherwise.
+    stdin_text = sys.stdin.read() if "-" in argv else None
+    try:
+        e = me()
+        agent = "%s@%s" % (e["name"], machine()) if e else None
+    except Fail:
+        agent = None
+    got = run_goals(argv, stdin_text, agent)
+    if got is None:
+        for m in peers():
+            try:
+                answer = rpc(m, "goals", data={"args": argv, "stdin": stdin_text, "agent": agent}, timeout=120)
+            except Fail:
+                continue
+            if "code" in answer:
+                got = answer
+                break
+    if got is None:
+        raise Fail("no goals CLI here or on a reachable peer (wsw-roster's `goals`)")
+    sys.stdout.write(got["stdout"])
+    sys.stderr.write(got["stderr"])
+    sys.stdout.flush()
+    sys.exit(got["code"])
+
+
 def model_args(model, effort):
     """Claude Code's own --model and --effort; checked here so a typo fails before a session starts."""
     if effort and effort not in EFFORTS:
@@ -3428,6 +3493,10 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"), opt("--harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "goals":
+            p = json.load(sys.stdin)
+            out = run_goals(p.get("args") or [], p.get("stdin"), p.get("agent")) or {
+                "error": "no goals CLI on %s" % machine()}
         elif verb == "decisions":
             p = json.load(sys.stdin)
             out = decisions(p["state"], p["questions"]) or {"error": "no OpenRouter key on %s" % machine()}
@@ -4301,6 +4370,12 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="only say where Jev would send it")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_capture)
+
+    s = sub.add_parser("goals", help="Senna's goals (wsw-roster's goals CLI), wherever it is installed",
+                       description="Runs `goals ARGS...` here, or on the peer that has it; see `roster goals --help` "
+                                   "passed through: roster goals -- --help")
+    s.add_argument("goal_args", nargs=argparse.REMAINDER, metavar="ARGS")
+    s.set_defaults(fn=cmd_goals)
 
     s = sub.add_parser("drift", help="ask Jev whether agents' names and roles still fit their conversations")
     s.add_argument("agent", nargs="?", help="check this one now (name or name@machine), however few new messages")
