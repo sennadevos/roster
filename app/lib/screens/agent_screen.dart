@@ -91,6 +91,9 @@ class _AgentScreenState extends State<AgentScreen> {
   /// Hands-free voice chat with this agent, once the mic was tapped.
   VoiceSession? _voice;
 
+  /// When the conversation was last pressed (to select text): see [_onConv].
+  DateTime? _pressedAt;
+
   /// Photos to go with the next prompt: (name, bytes), already shrunk.
   final List<(String, Uint8List)> _photos = [];
 
@@ -188,9 +191,15 @@ class _AgentScreenState extends State<AgentScreen> {
     final added = msgs.length - _lastCount;
     _lastCount = msgs.length;
     if (added <= 0) return;
-    if (_atBottom) {
+    // Selecting text (a press a moment ago, or a selection still there): the
+    // view stays put instead of following new messages, which would slide
+    // the text away mid double-click; the jump button says there is more.
+    final selecting = (_pressedAt != null && DateTime.now().difference(_pressedAt!) < const Duration(seconds: 6)) ||
+        (conversationSelection.value?.isNotEmpty ?? false);
+    if (_atBottom && !selecting) {
       _stickToBottom();
     } else if (msgs.isNotEmpty && _anchor != null) {
+      if (_atBottom) setState(() => _atBottom = false);
       // Only what came in at the bottom counts as unseen, not older pages.
       final anchorAt = msgs.indexWhere((m) => m.key == _anchor);
       final below = msgs.length - 1 - anchorAt;
@@ -442,7 +451,13 @@ class _AgentScreenState extends State<AgentScreen> {
                   Expanded(
                     child: Stack(
                       children: [
-                        Positioned.fill(child: _conversation(c, status)),
+                        Positioned.fill(
+                          child: Listener(
+                            behavior: HitTestBehavior.translucent,
+                            onPointerDown: (_) => _pressedAt = DateTime.now(),
+                            child: _conversation(c, status),
+                          ),
+                        ),
                         Positioned(
                           right: 16,
                           bottom: 12,

@@ -493,6 +493,57 @@ void main() {
     await hub.events.close();
     await tester.pump();
   });
+
+  testWidgets('pressing the conversation holds it still while new messages arrive, so a selection stays put', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    var transcript = [
+      for (var k = 1; k <= 30; k++) {'i': k, 'role': k.isEven ? 'assistant' : 'user', 'text': 'line $k of the talk'},
+    ];
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) {
+        final after = q['after'] == null ? null : int.parse(q['after']!);
+        final rows = after == null ? transcript : transcript.where((m) => (m['i'] as int) > after).toList();
+        return {'agent': q['agent'], 'session_id': 's', 'messages': rows, 'next': transcript.last['i'] as int};
+      },
+      'GET /v1/screen': (_, q) => {'agent': q['agent'], 'status': 'idle', 'text': '', 'dialog': null},
+    });
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({'agents': [row('alpha', 'srv', 'idle')], 'machines': machines});
+    await tester.pump();
+    await tester.pumpAndSettle();
+    openAgent('alpha@srv');
+    await tester.pumpAndSettle();
+    final position = tester
+        .state<ScrollableState>(find.descendant(of: find.byType(CustomScrollView), matching: find.byType(Scrollable)).first)
+        .position;
+    Future<void> more(int from) async {
+      transcript = [...transcript, for (var k = from; k < from + 3; k++) {'i': k, 'role': 'assistant', 'text': 'new line $k'}];
+      await state.conversation('alpha@srv').fetchNew();
+      await tester.pumpAndSettle();
+    }
+
+    // Not pressed: it follows the bottom.
+    await more(31);
+    expect(position.pixels, position.maxScrollExtent);
+
+    // Pressed (as when selecting): new lines come in below, the view stays.
+    await tester.tap(find.textContaining('line 29 of the talk'));
+    await tester.pumpAndSettle();
+    final held = position.pixels;
+    await more(34);
+    expect(position.pixels, held);
+    expect(position.maxScrollExtent, greaterThan(held));
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
 }
 
 /// For screens with a spinner, which never settles: pump long enough for
