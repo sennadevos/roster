@@ -89,15 +89,15 @@ Senna keeps goals (work packages) in the planning app. If your work belongs to o
 ```bash
 roster goals list [--status S] --json     # S: unrefined planned active blocked review done cancelled
 roster goals show <goal> --json           # <goal>: its number (12), L12 or WP467
-roster goals claim <goal> [--take]        # you work on it now; refused, with the holder's name, unless --take
-roster goals release <goal>
+roster goals join <goal> [--agent NAME]   # you (or NAME) work on it now; several agents on one goal is normal
+roster goals leave <goal> [--agent NAME]  # off it again: your part is done, or handed on
 roster goals status <goal> blocked --why "waiting for the PETG print"
 roster goals status <goal> review --why "prints done: check the snap arms"   # hands it back to Senna and pings him
 roster goals note <goal> -                # append a note, text on stdin
 roster goals describe <goal> -            # replace the description (clears the planning app's readiness scores)
 ```
 
-Goals are optional: most conversations have none, and nothing requires you to claim one. Use `review` only when Senna has to act; `blocked` is for waiting on something else.
+Goals are optional: most conversations have none, and nothing requires you to join one. Handing work on is `join --agent <them>` and then `leave`. Use `review` only when Senna has to act; `blocked` is for waiting on something else.
 
 ## The user's commands
 
