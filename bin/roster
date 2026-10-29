@@ -3741,7 +3741,7 @@ PARK_SERVICE = """[Unit]
 Description=Park roster agents idle for a while
 
 [Service]
-# Written by `roster install`; park_after_hours in config.toml, 0 turns it off.
+# Written by `roster install` only when config.toml sets park_after_hours (off by default).
 Type=oneshot
 ExecStart=%(bin)s/roster park --idle-for %(hours)s
 """
@@ -3858,7 +3858,8 @@ def cmd_install(args):
         "high": config().get("agent_memory_high", "60%"),
         "max": config().get("agent_memory_max", "75%"),
         "swap": config().get("agent_swap_max", "2G")}, args.check))
-    hours = config().get("park_after_hours", 8)
+    # Automatic parking is off unless config.toml asks for it (Senna did not like it).
+    hours = config().get("park_after_hours", 0)
     if hours:
         done.append(put(os.path.join(units, "roster-park.service"),
                         PARK_SERVICE % {"bin": HOME_BIN, "hours": hours}, args.check))
