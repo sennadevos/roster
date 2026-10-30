@@ -60,19 +60,25 @@ import os
 import sys
 
 
-def _turn_due(state, adir):
-    """Count a turn (a prompt the agent gets); True on every drift_every-th.
-
-    drift_every is in <state>/drift-every, written by `roster install`; no
-    file or 0 is no counting. Plain os only: this runs on every prompt.
-    """
+def _every(state, name):
     try:
-        with open(os.path.join(state, "drift-every")) as f:
-            every = int(f.read().strip() or 0)
+        with open(os.path.join(state, name)) as f:
+            return int(f.read().strip() or 0)
     except (OSError, ValueError):
-        return False
-    if every <= 0:
-        return False
+        return 0
+
+
+def _turn_due(state, adir):
+    """Count a turn (a prompt the agent gets); say which checks are due.
+
+    drift-every and compact-every (in <state>, written by `roster install`; 0
+    or no file is off) give how often. Plain os only: this runs on every
+    prompt. Returns (drift due, compact check due).
+    """
+    every = _every(state, "drift-every")
+    compact = _every(state, "compact-every")
+    if every <= 0 and compact <= 0:
+        return False, False
     path = os.path.join(adir, "turns")
     try:
         with open(path) as f:
@@ -83,8 +89,8 @@ def _turn_due(state, adir):
         with open(path, "w") as f:
             f.write("%d\n" % n)
     except OSError:
-        return False
-    return n % every == 0
+        return False, False
+    return every > 0 and n % every == 0, compact > 0 and n % compact == 0
 
 
 def _hook_fast_path():
@@ -119,10 +125,14 @@ def _hook_fast_path():
         if not name:
             sys.exit(0)
         adir = os.path.join(state, "agents", name.replace("/", "%"))
-        if event == "UserPromptSubmit" and _turn_due(state, adir):
-            os.environ["ROSTER_DRIFT_DUE"] = "1"  # the full path starts a drift check
-            sys.stdin = __import__("io").StringIO(raw)
-            return
+        if event == "UserPromptSubmit":
+            drift, compact = _turn_due(state, adir)
+            if drift or compact:
+                # The full path starts the checks that are due.
+                os.environ["ROSTER_DRIFT_DUE"] = "1" if drift else ""
+                os.environ["ROSTER_COMPACT_DUE"] = "1" if compact else ""
+                sys.stdin = __import__("io").StringIO(raw)
+                return
         work = event in ("SubagentStart", "SubagentStop") or (
             event in ("Stop", "PostToolUse", "UserPromptSubmit") and os.listdir(os.path.join(adir, "inbox", "new")))
         if not work and event == "UserPromptSubmit":
@@ -1573,7 +1583,8 @@ def cmd_new(args):
         print(json.dumps({"agent": "%s@%s" % (entry["name"], machine()), "name": entry["name"],
                           "machine": machine(), "cwd": short_path(entry["cwd"]), "plan": plan}))
     else:
-        print("started %s in %s" % (entry["name"], short_path(entry["cwd"])))
+        how = "/".join(x for x in (entry.get("model"), entry.get("effort")) if x) or "the default model"
+        print("started %s in %s, on %s" % (entry["name"], short_path(entry["cwd"]), how))
     if args.no_attach:
         return
     pane = entry["pane_id"]
@@ -1793,6 +1804,87 @@ def cmd_drift(args):
     write_atomic(DRIFT_STATE, json.dumps(seen, indent=1))
 
 
+# --- compacting when Jev says it is a good moment ------------------------------
+#
+# Every compact_every-th turn (5) of an agent, once it is idle: below
+# compact_above tokens of context (150k) nothing happens; above compact_force
+# (500k) it compacts; in between Jev is asked whether the conversation is at a
+# natural break, where a summary would do for what came before. Compacting is
+# Claude Code's /compact: it summarizes and carries on from the summary. Never a
+# clear. Logged with Jev's cost in compact-log.jsonl.
+
+COMPACT_LOG = os.path.join(STATE, "compact-log.jsonl")
+
+
+def context_size(session_id):
+    """Tokens in the agent's context at its last call, from its transcript."""
+    try:
+        path = transcript_path(session_id)
+    except Fail:
+        return 0
+    size = 0
+    try:
+        with open(path, errors="replace") as f:
+            for line in f:
+                if '"usage"' not in line or '"assistant"' not in line:
+                    continue
+                try:
+                    u = (json.loads(line).get("message") or {}).get("usage") or {}
+                except ValueError:
+                    continue
+                if u:
+                    size = (u.get("input_tokens", 0) + u.get("cache_read_input_tokens", 0)
+                            + u.get("cache_creation_input_tokens", 0))
+    except OSError:
+        return 0
+    return size
+
+
+def cmd_compact_check(args):
+    name = check_name(args.name)
+    above = int(config().get("compact_above", 150000))
+    force = int(config().get("compact_force", 500000))
+    deadline = time.time() + 3600
+    while True:  # wait until it is idle, and nobody is typing to it
+        e = load(name)
+        if not e or e.get("status") in ENDED + (PARKED,):
+            return
+        if e.get("status") in ("idle", "done"):
+            break
+        if time.time() > deadline:
+            return
+        time.sleep(15)
+    size = context_size(e["session_id"])
+    line = {"at": now(), "agent": "%s@%s" % (name, machine()), "context": size}
+    if size < above:
+        return  # small: not worth a look, nor a log line
+    if size >= force:
+        line.update(decision="compact", why="over %d" % force)
+    else:
+        msgs, _ = read_transcript(e["session_id"], limit=40)
+        convo = "\n".join("%s: %s" % (m["role"], m["text"][:300]) for m in msgs if m["role"] in ("user", "assistant"))[-12000:]
+        answer = decisions_anywhere(
+            {"agent_role": e.get("role") or "", "recent_conversation": convo},
+            {"break": {"type": "noul", "instructions":
+                       "Is this conversation at a natural break, where the task in hand is finished or the topic has "
+                       "changed, so that the earlier details no longer need to be kept word for word and a summary "
+                       "of them would do? No when work is half done or the next step depends on exact details."}})
+        p = float(((answer.get("answers") or {}).get("break") or {}).get("noul") or 0)
+        line.update(decision="compact" if p >= 0.6 else "wait", jev=round(p, 2),
+                    cost=(answer.get("usage") or {}).get("cost"))
+    if line["decision"] == "compact":
+        e = load(name)
+        if e and e.get("status") in ("idle", "done") and not unread(name) and prompt_is_empty(e):
+            try:
+                submit(e, "/compact")
+            except Fail as exc:
+                line.update(decision="failed", why=str(exc))
+        else:
+            line.update(decision="skipped", why="busy again, or text in its input")
+    with open(COMPACT_LOG, "a") as f:
+        f.write(json.dumps(line) + "\n")
+
+
 def drift_lines():
     try:
         with open(DRIFT_LOG) as f:
@@ -1955,8 +2047,10 @@ def plan_brief(brief):
         "Use an existing folder from that machine's list when the brief is about that project; otherwise a new "
         "folder <that machine's home>/Desktop/<short-kebab-name>, with new_folder true. The name must be free "
         "(not in `agents`), short and kebab-case; put it under a lead (lead/sub) only if the brief clearly works "
-        "for that lead's project. Model: opus with effort high by default; sonnet or lower effort only for small, "
-        "routine work; follow the brief if it asks for a model or effort. Confidences are 0..1.\n\n"
+        "for that lead's project. Model: sonnet with effort medium by default (Senna pays for every token); opus, "
+        "or high effort, only when the brief asks for it or clearly needs deep reasoning (a large refactor, hard "
+        "debugging, architecture); fable only when the brief names it; haiku or low effort for small routine jobs. "
+        "Follow the brief if it asks for a model or effort. Confidences are 0..1.\n\n"
         "Roster:\n%s\n\nBrief:\n%s" % (desk, json.dumps(context, indent=1), brief))
     claude = tool("claude")
     proc = run([claude, "-p", "--strict-mcp-config", "--model", "sonnet", "--output-format", "json", "--tools", "",
@@ -4040,6 +4134,8 @@ def cmd_install(args):
                     short_path(skill), exc.strerror or exc))
     # Drift checks go by turns, counted in the hooks (drift_every, default 10; 0 is off).
     done.append(put(os.path.join(STATE, "drift-every"), "%d\n" % int(config().get("drift_every", 10)), args.check))
+    # And whether to compact, every compact_every turns (5; 0 is off): see cmd_compact_check.
+    done.append(put(os.path.join(STATE, "compact-every"), "%d\n" % int(config().get("compact_every", 5)), args.check))
     if args.tray:
         done.append(put(os.path.join(units, "roster-tray.service"),
                         TRAY_SERVICE % {"bin": HOME_BIN}, args.check))
@@ -4303,6 +4399,11 @@ def cmd_hook(args):
         e = load(name)
         if e and e.get("session_id") == session_id and e.pop("waiting", None) is not None:
             save(e)
+    if event == "UserPromptSubmit" and os.environ.pop("ROSTER_COMPACT_DUE", None):
+        # Its compact_every-th turn: once it is idle, see whether to compact.
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), "compact-check", name],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True)
     if event == "UserPromptSubmit" and os.environ.pop("ROSTER_DRIFT_DUE", None):
         # Its drift_every-th turn: a drift check, detached, so the prompt does not wait.
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "drift", name],
@@ -4487,6 +4588,10 @@ def main():
                                    "passed through: roster goals -- --help")
     s.add_argument("goal_args", nargs=argparse.REMAINDER, metavar="ARGS")
     s.set_defaults(fn=cmd_goals)
+
+    s = sub.add_parser("compact-check", help=argparse.SUPPRESS)
+    s.add_argument("name")
+    s.set_defaults(fn=cmd_compact_check)
 
     s = sub.add_parser("drift", help="ask Jev whether agents' names and roles still fit their conversations")
     s.add_argument("agent", nargs="?", help="check this one now (name or name@machine), however few new messages")

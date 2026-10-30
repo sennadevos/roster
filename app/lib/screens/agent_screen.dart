@@ -1252,6 +1252,13 @@ class _DialogCardState extends State<DialogCard> {
     if (e is! KeyDownEvent) return KeyEventResult.ignored;
     final dialog = widget.screen?.dialog;
     if (dialog == null) return KeyEventResult.ignored;
+    // Keys reach this card also from the text field inside it (the own
+    // answer): there a digit is typing, never a pick.
+    final focused = FocusManager.instance.primaryFocus?.context;
+    if (focused != null &&
+        (focused.widget is EditableText || focused.findAncestorStateOfType<EditableTextState>() != null)) {
+      return KeyEventResult.ignored;
+    }
     final ch = e.character;
     for (final o in dialog.options) {
       if (ch != null && ch == o.key) {

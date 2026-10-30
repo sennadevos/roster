@@ -218,6 +218,39 @@ void main() {
     expect(picked.last, ['Left']);
   });
 
+  testWidgets('dialog card: a digit typed into the own-answer field is typing, not a pick', (tester) async {
+    final picked = <List<String>>[];
+    final focus = FocusNode();
+    addTearDown(focus.dispose);
+    final screen = Screen.fromJson(jsonDecode('''
+      {"status": "blocked", "text": "", "dialog": {"title": "How much clearance?",
+        "options": [{"key": "1", "label": "1 mm"}, {"key": "2", "label": "2 mm"},
+                    {"key": "3", "label": "Type something", "input": true, "text": ""}]}}''') as Map<String, dynamic>);
+    await tester.pumpWidget(MaterialApp(
+      theme: buildTheme(Brightness.light),
+      home: Scaffold(
+        body: DialogCard(
+          screen: screen,
+          focusNode: focus,
+          onPick: (o) async => picked.add(o.keys),
+          onAnswerText: (o, t) async {},
+          onRefresh: () async {},
+        ),
+      ),
+    ));
+    await tester.tap(find.byType(TextField));
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit2);
+    await tester.pump();
+    expect(picked, isEmpty);
+    // On the card itself a digit still picks.
+    focus.requestFocus();
+    await tester.pump();
+    await tester.sendKeyEvent(LogicalKeyboardKey.digit2);
+    await tester.pump();
+    expect(picked, [['2']]);
+  });
+
   testWidgets('right click on a row: park or kill a live agent, start or kill a parked one', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1280, 800);
