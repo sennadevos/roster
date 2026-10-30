@@ -69,9 +69,11 @@ class UserBubble extends StatelessWidget {
   /// Pulled back into the agent's input to edit: never sent as it was.
   final bool withdrawn;
 
-  /// "[Attached image: …/20261027-134453-1-red.png]" as "📷 red.png".
+  /// "[Attached image: …/20261027-134453-1-red.png]" as "📷 red.png", and
+  /// "[Attached file: …/20261030-105827-clip.mp4]" as "📎 clip.mp4".
   static String shown(String text) => text.replaceAllMapped(
-      RegExp(r'^\[Attached image: (?:.*/)?(?:\d{8}-\d{6}-\d+-)?([^/\]]+)\]$', multiLine: true), (m) => '📷 ${m[1]}');
+      RegExp(r'^\[Attached (image|file): (?:.*/)?(?:\d{8}-\d{6}-(?:\d+-)?)?([^/\]]+)\]$', multiLine: true),
+      (m) => '${m[1] == 'image' ? '📷' : '📎'} ${m[2]}');
 
   @override
   Widget build(BuildContext context) {

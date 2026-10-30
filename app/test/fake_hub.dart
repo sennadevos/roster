@@ -31,7 +31,12 @@ class FakeHub {
     if (!key.endsWith('/v1/pair') && req.headers['Authorization'] != 'Bearer $validToken') {
       return http.Response('{"error": "unauthorized"}', 401);
     }
-    final body = req.body.isEmpty ? <String, dynamic>{} : jsonDecode(req.body) as Map<String, dynamic>;
+    // A raw upload: the handler gets its bytes, not JSON.
+    final body = req.headers['Content-Type'] == 'application/octet-stream'
+        ? <String, dynamic>{'bytes': req.bodyBytes}
+        : req.body.isEmpty
+            ? <String, dynamic>{}
+            : jsonDecode(req.body) as Map<String, dynamic>;
     final out = route(body, req.url.queryParameters);
     if (out is (int, String)) return http.Response('{"error": "${out.$2}"}', out.$1);
     return http.Response(jsonEncode(out), 200, headers: {'content-type': 'application/json'});

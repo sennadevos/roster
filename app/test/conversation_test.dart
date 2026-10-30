@@ -118,4 +118,32 @@ void main() {
     expect(base64Decode(images.single['data'] as String), bytes);
     expect(UserBubble.shown(c.messages.last.text), 'what is this?\n\n📷 cat.jpg');
   });
+
+  test('a prompt with a file: uploaded first, raw, then named in the prompt', () async {
+    final uploads = <(String, List<int>)>[];
+    String? prompted;
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, q) => {'agent': 'a@m', 'session_id': 's', 'next': 1, 'messages': [
+            if (prompted != null) {'i': 1, 'role': 'user', 'text': prompted},
+          ]},
+      'POST /v1/upload': (b, q) {
+        uploads.add((q['name']!, b['bytes'] as List<int>));
+        return {'path': '/home/x/.cache/roster/uploads/a/20261030-110520-${q['name']}'};
+      },
+      'POST /v1/prompt': (b, _) {
+        prompted = b['text'] as String;
+        return {'ok': true};
+      },
+    });
+    final c = Conversation(hub.client(Uri.parse('https://hub'), 'tok-1'), 'a@m');
+    await c.loadTail();
+    final bytes = List<int>.generate(5000, (k) => k % 251);
+    final sending = c.send('look at this', files: [('clip.mp4', bytes.length, () => Stream.value(bytes))]);
+    expect(c.pending, ['look at this\n📎 1 file']);
+    await sending;
+    expect(uploads.single.$1, 'clip.mp4');
+    expect(uploads.single.$2, bytes);
+    expect(prompted, 'look at this\n\n[Attached file: /home/x/.cache/roster/uploads/a/20261030-110520-clip.mp4]');
+    expect(UserBubble.shown(prompted!), 'look at this\n\n📎 clip.mp4');
+  });
 }

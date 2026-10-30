@@ -4,6 +4,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:flutter/material.dart';
 import 'package:flutter/rendering.dart' show ScrollDirection;
 import 'package:flutter/services.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:image_picker/image_picker.dart';
 
 import '../app.dart';
@@ -96,6 +97,9 @@ class _AgentScreenState extends State<AgentScreen> {
 
   /// Photos to go with the next prompt: (name, bytes), already shrunk.
   final List<(String, Uint8List)> _photos = [];
+
+  /// Files of any kind (videos, PDFs) to go with it: uploaded as they are sent.
+  final List<PlatformFile> _files = [];
 
   /// While the agent works its row does not change, so nothing else says
   /// there is more to read: look every few seconds.
@@ -267,19 +271,32 @@ class _AgentScreenState extends State<AgentScreen> {
 
   Future<void> _send() async {
     final text = _input.text.trim();
-    if (text.isEmpty && _photos.isEmpty) return;
+    if (text.isEmpty && _photos.isEmpty && _files.isEmpty) return;
     final photos = List.of(_photos);
+    final files = List.of(_files);
     // Shown at once (pending); the field is free for the next one.
     _input.clear();
-    setState(_photos.clear);
+    setState(() {
+      _photos.clear();
+      _files.clear();
+    });
     _atBottom = true;
     _stickToBottom();
     try {
-      await _conv.send(text, images: photos);
+      final uploads = <(String, int, Stream<List<int>> Function())>[];
+      for (final f in files) {
+        uploads.add((f.name, f.lengthSync() ?? await f.length() ?? 0, f.readAsByteStream));
+      }
+      await _conv.send(text, images: photos, files: uploads);
     } catch (e) {
       if (!mounted) return;
       if (_input.text.isEmpty) _input.text = text;
-      if (_photos.isEmpty) setState(() => _photos.addAll(photos));
+      if (_photos.isEmpty && _files.isEmpty) {
+        setState(() {
+          _photos.addAll(photos);
+          _files.addAll(files);
+        });
+      }
       showError(context, e);
     }
   }
@@ -289,27 +306,41 @@ class _AgentScreenState extends State<AgentScreen> {
   /// prompt stays well under the hub's limit and Claude reads them quickly.
   Future<void> _addPhotos() async {
     final picker = ImagePicker();
-    ImageSource? source = ImageSource.gallery;
-    if (!kIsWeb) {
-      source = await showModalBottomSheet<ImageSource>(
-        context: context,
-        builder: (c) => SafeArea(
-          child: Column(mainAxisSize: MainAxisSize.min, children: [
+    final choice = await showModalBottomSheet<String>(
+      context: context,
+      builder: (c) => SafeArea(
+        child: Column(mainAxisSize: MainAxisSize.min, children: [
+          if (!kIsWeb)
             ListTile(
               leading: const Icon(Icons.photo_camera_outlined),
               title: const Text('Take a photo'),
-              onTap: () => Navigator.pop(c, ImageSource.camera),
+              onTap: () => Navigator.pop(c, 'camera'),
             ),
-            ListTile(
-              leading: const Icon(Icons.photo_library_outlined),
-              title: const Text('Choose photos'),
-              onTap: () => Navigator.pop(c, ImageSource.gallery),
-            ),
-          ]),
-        ),
-      );
-      if (source == null) return;
+          ListTile(
+            leading: const Icon(Icons.photo_library_outlined),
+            title: const Text('Choose photos'),
+            onTap: () => Navigator.pop(c, 'gallery'),
+          ),
+          ListTile(
+            leading: const Icon(Icons.attach_file),
+            title: const Text('Choose files'),
+            subtitle: const Text('Videos, PDFs, anything, up to 1 GB each'),
+            onTap: () => Navigator.pop(c, 'files'),
+          ),
+        ]),
+      ),
+    );
+    if (choice == null) return;
+    if (choice == 'files') {
+      try {
+        final files = await FilePicker.pickFiles();
+        if (mounted && files.isNotEmpty) setState(() => _files.addAll(files));
+      } catch (e) {
+        if (mounted) showError(context, e);
+      }
+      return;
     }
+    final source = choice == 'camera' ? ImageSource.camera : ImageSource.gallery;
     try {
       final files = source == ImageSource.camera
           ? [?await picker.pickImage(source: ImageSource.camera, maxWidth: 1600, maxHeight: 1600, imageQuality: 80)]
@@ -489,6 +520,8 @@ class _AgentScreenState extends State<AgentScreen> {
                   if (_voice != null) VoiceBar(_voice!),
                   if (_photos.isNotEmpty)
                     _PhotoStrip(photos: _photos, onRemove: (k) => setState(() => _photos.removeAt(k))),
+                  if (_files.isNotEmpty)
+                    _FileStrip(files: _files, onRemove: (k) => setState(() => _files.removeAt(k))),
                   _Composer(
                     controller: _input,
                     focusNode: _inputFocus,
@@ -505,7 +538,7 @@ class _AgentScreenState extends State<AgentScreen> {
                     onSend: _send,
                     onVoice: voiceEngines != null && !ended && !stale ? _toggleVoice : null,
                     onPhotos: !ended && !stale ? _addPhotos : null,
-                    photoCount: _photos.length,
+                    photoCount: _photos.length + _files.length,
                     voiceOn: _voice?.active ?? false,
                   ),
                 ],
@@ -720,6 +753,43 @@ class _Picker extends StatelessWidget {
         Tag(label, icon: icon),
         const Icon(Icons.arrow_drop_down, size: 16),
       ]),
+    );
+  }
+}
+
+/// The files that go with the next prompt, as chips with name and size; each can go.
+class _FileStrip extends StatelessWidget {
+  const _FileStrip({required this.files, required this.onRemove});
+
+  final List<PlatformFile> files;
+  final void Function(int) onRemove;
+
+  static String _size(int? bytes) => bytes == null
+      ? ''
+      : bytes >= 1 << 20
+          ? ' · ${(bytes / (1 << 20)).toStringAsFixed(1)} MB'
+          : ' · ${(bytes / 1024).ceil()} KB';
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 0),
+      child: Center(
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: conversationWidth - 24),
+          child: Align(
+            alignment: Alignment.centerLeft,
+            child: Wrap(spacing: 8, runSpacing: 6, children: [
+              for (var k = 0; k < files.length; k++)
+                InputChip(
+                  avatar: const Icon(Icons.insert_drive_file_outlined, size: 18),
+                  label: Text('${files[k].name}${_size(files[k].lengthSync())}', overflow: TextOverflow.ellipsis),
+                  onDeleted: () => onRemove(k),
+                ),
+            ]),
+          ),
+        ),
+      ),
     );
   }
 }
@@ -1575,8 +1645,8 @@ class _Composer extends StatelessWidget {
                         padding: const EdgeInsets.fromLTRB(0, 5, 0, 5),
                         child: IconButton(
                           onPressed: enabled ? onPhotos : null,
-                          icon: const Icon(Icons.add_photo_alternate_outlined),
-                          tooltip: 'Add photos',
+                          icon: const Icon(Icons.attach_file),
+                          tooltip: 'Add photos or files',
                         ),
                       ),
                     if (onVoice != null && onResume == null)

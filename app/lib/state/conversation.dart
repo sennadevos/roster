@@ -40,7 +40,7 @@ class Conversation extends ChangeNotifier {
     final t = userText.trim();
     pending.removeWhere((p) {
       final key = _pendingKey[p] ?? p;
-      final hit = key.isEmpty ? t.contains('[Attached image:') : (t == key || t.startsWith('$key\n'));
+      final hit = key.isEmpty ? t.contains('[Attached ') : (t == key || t.startsWith('$key\n'));
       if (hit) _pendingKey.remove(p);
       return hit;
     });
@@ -217,16 +217,27 @@ class Conversation extends ChangeNotifier {
 
   /// Sends a prompt. It shows at once as pending, and goes when the
   /// transcript has it; on failure it is taken back and the error rethrown.
-  Future<void> send(String text, {List<(String, Uint8List)> images = const []}) async {
+  /// [files] (name, length, open) go first, uploaded as they are read, and
+  /// the prompt names where they landed on the agent's machine.
+  Future<void> send(String text,
+      {List<(String, Uint8List)> images = const [], List<(String, int, Stream<List<int>> Function())> files = const []}) async {
     final key = text.trim();
     final n = images.length;
-    // What the bubble shows while it goes; photos as a count.
-    final t = [if (key.isNotEmpty) key, if (n > 0) '📷 $n photo${n == 1 ? '' : 's'}'].join('\n');
+    final f = files.length;
+    // What the bubble shows while it goes; photos and files as a count.
+    final t = [
+      if (key.isNotEmpty) key,
+      if (n > 0) '📷 $n photo${n == 1 ? '' : 's'}',
+      if (f > 0) '📎 $f file${f == 1 ? '' : 's'}',
+    ].join('\n');
     pending.add(t);
     _pendingKey[t] = key;
     _changed();
     try {
-      await client.prompt(agent, key, images: images);
+      final paths = [for (final (name, length, open) in files) await client.upload(agent, name, length, open())];
+      final lines = paths.map((p) => '[Attached file: $p]').join('\n');
+      final body = paths.isEmpty ? key : (key.isEmpty ? lines : '$key\n\n$lines');
+      await client.prompt(agent, body, images: images);
     } catch (_) {
       pending.remove(t);
       _pendingKey.remove(t);

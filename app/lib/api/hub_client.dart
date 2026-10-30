@@ -179,6 +179,46 @@ class HubClient {
 
   Future<void> kill(String agent) => _send('POST', '/v1/kill', body: {'agent': agent});
 
+  /// A file for [agent], any kind (a video, a PDF), sent raw as it is read;
+  /// it is kept on the agent's machine. Answers its path there, for a prompt
+  /// to name.
+  Future<String> upload(String agent, String name, int length, Stream<List<int>> bytes) async {
+    final uri = _uri('/v1/upload', {'agent': agent, 'name': name});
+    final Future<http.StreamedResponse> sending;
+    if (kIsWeb) {
+      // A browser streams a request body only over HTTP/2, and the hub speaks
+      // HTTP/1.1: the file goes in one piece.
+      final all = BytesBuilder(copy: false);
+      await for (final chunk in bytes) {
+        all.add(chunk);
+      }
+      sending = _client.send(http.Request('POST', uri)
+        ..headers.addAll(_headers)
+        ..headers['Content-Type'] = 'application/octet-stream'
+        ..bodyBytes = all.takeBytes());
+    } else {
+      final req = http.StreamedRequest('POST', uri)
+        ..headers.addAll(_headers)
+        ..headers['Content-Type'] = 'application/octet-stream'
+        ..contentLength = length;
+      sending = _client.send(req);
+      await bytes.pipe(req.sink);
+    }
+    final http.Response res;
+    try {
+      res = await http.Response.fromStream(await sending.timeout(const Duration(minutes: 30)));
+    } on TimeoutException {
+      throw const HubException(0, 'the hub did not answer in time');
+    } on http.ClientException catch (e) {
+      throw HubException(0, 'cannot reach the hub: ${e.message}');
+    }
+    final json = jsonDecode(utf8.decode(res.bodyBytes));
+    if (res.statusCode >= 400 || json is! Map || json['path'] is! String) {
+      throw HubException(res.statusCode, json is Map && json['error'] != null ? '${json['error']}' : 'upload failed');
+    }
+    return json['path'] as String;
+  }
+
   /// SDK agents: stop the turn in progress; true when there was one.
   Future<bool> interrupt(String agent) async =>
       (await _send('POST', '/v1/interrupt', body: {'agent': agent}))['interrupted'] == true;
