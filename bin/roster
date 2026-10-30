@@ -125,6 +125,10 @@ def _hook_fast_path():
             return
         work = event in ("SubagentStart", "SubagentStop") or (
             event in ("Stop", "PostToolUse", "UserPromptSubmit") and os.listdir(os.path.join(adir, "inbox", "new")))
+        if not work and event == "UserPromptSubmit":
+            # A prompt may end a declared wait (roster waiting).
+            with open(os.path.join(adir, "agent.json")) as f:
+                work = '"waiting":' in f.read()
         if not work and event in ("UserPromptSubmit", "Stop", "StopFailure", "Notification",
                                   "PermissionRequest", "PostToolUse"):
             # tmux agents take their status from these hooks. PostToolUse runs on
@@ -1192,6 +1196,8 @@ def render_list(rows, color=False, width=None):
                 head += "  " + paint("1;31", "⚠ API error (%s); needs you" % st["error"])
         lines.append(head)
         indent = pad + "  "
+        if e.get("waiting") and not ended:
+            lines.append(indent + paint("1;35", "⏳ waiting for you: %s" % e["waiting"].get("text", "")))
         if e.get("drift") and not ended:
             lines.append(indent + paint("1;33", "⚑ name and role may not fit the conversation anymore (Jev %.2f)"
                                          % e["drift"].get("fits", 0)))
@@ -1415,6 +1421,29 @@ def cmd_wake_later(args):
             os.remove(waiter_marker(name))
         except OSError:
             pass
+
+
+def cmd_waiting(args):
+    """Declare that this agent waits on Senna, with one line on what it needs.
+
+    Cleared by the next prompt that is not roster's own (a wake for mail is
+    not an answer), or with --clear. Shown in list (--json: waiting.text),
+    as Needs you in the app, and pushed to the phone by the hub.
+    """
+    e = me()
+    if not e:
+        raise Fail("not on the roster")
+    if args.clear:
+        if e.pop("waiting", None) is not None:
+            save(e)
+        print("%s is not waiting" % e["name"])
+        return
+    text = " ".join((sys.stdin.read() if args.text in (None, "-") else args.text).split())
+    if not text:
+        raise Fail("say in one line what you need from Senna")
+    e["waiting"] = {"text": text[:300], "at": now()}
+    save(e)
+    print("%s waits on Senna: %s" % (e["name"], text[:300]))
 
 
 def cmd_inbox(args):
@@ -4269,6 +4298,11 @@ def cmd_hook(args):
     name = name_for_session(session_id)
     if not name:
         return
+    if event == "UserPromptSubmit" and not str(data.get("prompt") or "").lstrip().startswith("[roster]"):
+        # Senna answered (or someone prompted it): the declared wait is over.
+        e = load(name)
+        if e and e.get("session_id") == session_id and e.pop("waiting", None) is not None:
+            save(e)
     if event == "UserPromptSubmit" and os.environ.pop("ROSTER_DRIFT_DUE", None):
         # Its drift_every-th turn: a drift check, detached, so the prompt does not wait.
         subprocess.Popen([sys.executable, os.path.abspath(__file__), "drift", name],
@@ -4329,6 +4363,11 @@ def main():
     s.add_argument("message", nargs="?", help="message text, or - / omitted for stdin")
     s.add_argument("--reply-to", help="id of the message this answers")
     s.set_defaults(fn=cmd_send)
+
+    s = sub.add_parser("waiting", help="say that you wait on Senna, and for what; cleared by his next prompt")
+    s.add_argument("text", nargs="?", help="one line: what you need from him, or - for stdin")
+    s.add_argument("--clear", action="store_true", help="no longer waiting")
+    s.set_defaults(fn=cmd_waiting)
 
     s = sub.add_parser("inbox", help="read new mail")
     s.add_argument("--peek", action="store_true", help="leave it unread")

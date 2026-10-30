@@ -631,6 +631,8 @@ class Hub:
             kind, took = None, None
             if needs_you(r) and not needs_you(p):
                 kind = "error"
+            elif r.get("waiting") and r.get("waiting") != p.get("waiting"):
+                kind = "waiting"  # declared with roster waiting; it also ends a turn, so before finished
             elif r.get("status") == "blocked" and p.get("status") != "blocked":
                 kind = "blocked"
             elif p.get("status") == "working" and r.get("status") in ("idle", "done") and not r.get("stalled"):
@@ -657,6 +659,9 @@ class Hub:
             if st.get("message"):
                 body += ": " + st["message"]
             return {"type": "error", "agent": agent, "title": "%s: API error" % agent, "body": body[:300]}
+        if kind == "waiting":
+            return {"type": "waiting", "agent": agent, "title": "%s is waiting for you" % agent,
+                    "body": ((row.get("waiting") or {}).get("text") or "it needs you")[:300]}
         if kind == "blocked":
             body = None
             try:

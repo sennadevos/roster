@@ -934,6 +934,25 @@ class AgentTile extends StatelessWidget {
                                 ),
                               ),
                             ),
+                          if (a.waiting != null && !a.ended)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 3),
+                              child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                                Padding(
+                                  padding: const EdgeInsets.only(top: 1),
+                                  child: Icon(Icons.hourglass_top_rounded, size: 14, color: sc.blocked),
+                                ),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(
+                                    a.waiting!,
+                                    maxLines: 2,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(color: sc.blocked, fontWeight: FontWeight.w500),
+                                  ),
+                                ),
+                              ]),
+                            ),
                           if (a.drift != null && !a.ended)
                             Padding(
                               padding: const EdgeInsets.only(top: 3),

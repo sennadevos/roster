@@ -48,6 +48,10 @@ void main() {
     // roster drift's flag: Jev's score, only while it says the name and role do not fit
     expect(Agent.fromJson(row('a', 'm', 'idle', extra: {'drift': {'fits': 0.3, 'at': 'x'}})).drift, 0.3);
     expect(Agent.fromJson(row('a', 'm', 'idle')).drift, isNull);
+    // roster waiting: declared, so it needs the user, with its line
+    final waits = Agent.fromJson(row('a', 'm', 'idle', extra: {'waiting': {'text': 'OK to push?', 'at': 'x'}}));
+    expect(waits.waiting, 'OK to push?');
+    expect(waits.needsYou, isTrue);
     // A transient API error resumes by itself; others need the user.
     expect(Agent.fromJson(row('a', 'm', 'idle', extra: {'stalled': {'error': 'overloaded'}})).needsYou, isFalse);
     expect(Agent.fromJson(row('a', 'm', 'idle', extra: {'stalled': {'error': 'billing_error'}})).needsYou, isTrue);

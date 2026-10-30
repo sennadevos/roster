@@ -471,6 +471,8 @@ class _AgentScreenState extends State<AgentScreen> {
               return Column(
                 children: [
                   if (row?.stalled != null && !ended) _StalledBanner(row!.stalled!),
+                  if (row?.waiting != null && !ended)
+                    _InfoBanner(icon: Icons.hourglass_top_rounded, text: 'Waiting for you: ${row!.waiting}'),
                   if (stale) _InfoBanner(icon: Icons.cloud_off_outlined, text: '@${row!.machine} is unreachable (${row.stale}). This is its last known state.'),
                   if (c.error != null)
                     _InfoBanner(

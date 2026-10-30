@@ -63,7 +63,8 @@ class HubTest(unittest.TestCase):
         cls.fake_dir = os.path.join(cls.tmp, "fake")
         os.makedirs(cls.fake_dir)
         cls.set_rows([row("infra", "idle"), row("worker", "working", since=120),
-                      row("asker", "working"), row("web", "idle", machine="laptop", local=False)])
+                      row("asker", "working"), row("web", "idle", machine="laptop", local=False),
+                      row("waiter", "working")])
         cls.sink = http.server.ThreadingHTTPServer(("127.0.0.1", 0), PushSink)
         threading.Thread(target=cls.sink.serve_forever, daemon=True).start()
         cls.sink_url = "http://127.0.0.1:%d/" % cls.sink.server_address[1]
@@ -360,7 +361,8 @@ class HubTest(unittest.TestCase):
             pass
         self.assertEqual(first, b"event: agents\n")
         self.set_rows([row("infra", "idle"), row("worker", "idle", since=0), row("asker", "blocked", since=0),
-                       row("web", "idle", machine="laptop", local=False)])
+                       row("web", "idle", machine="laptop", local=False),
+                       row("waiter", "idle", since=0, waiting={"text": "OK to push to develop?", "at": "x"})])
         def next_event():
             lines = []
             while True:
@@ -378,7 +380,7 @@ class HubTest(unittest.TestCase):
         else:
             self.fail("the change never came through the stream")
         conn.close()
-        got = self.wait_for(lambda: len([p for p in PushSink.got if p["path"] == "/upmain"]) >= 2 and PushSink.got)
+        got = self.wait_for(lambda: len([p for p in PushSink.got if p["path"] == "/upmain"]) >= 3 and PushSink.got)
         mine = [p for p in got if p["path"] == "/upmain"]
         self.assertTrue(all(p["auth"] == "Bearer ntfy-secret" for p in mine))
         by_type = {p["body"]["type"]: p["body"] for p in mine}
@@ -386,6 +388,9 @@ class HubTest(unittest.TestCase):
         self.assertEqual(by_type["finished"]["body"], "All done: tests pass.")
         self.assertEqual(by_type["blocked"]["agent"], "asker@hub1")
         self.assertEqual(by_type["blocked"]["body"], "Do you want to run git push?")
+        # a declared wait (roster waiting) is its own push, with the agent's line
+        self.assertEqual(by_type["waiting"]["agent"], "waiter@hub1")
+        self.assertEqual(by_type["waiting"]["body"], "OK to push to develop?")
 
     def test_revoke(self):
         token, dev = self.pair(xff="198.51.100.4")

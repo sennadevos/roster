@@ -83,6 +83,7 @@ class Agent {
     this.temp = false,
     this.harness,
     this.drift,
+    this.waiting,
     this.subagents = const [],
     required this.fingerprint,
   });
@@ -116,6 +117,9 @@ class Agent {
   /// the conversation (`roster drift`); null when they fit, or never checked.
   final double? drift;
 
+  /// What the agent said it waits for from the user (roster waiting), or null.
+  final String? waiting;
+
   /// An SDK agent: its model and effort switch live, and it can be interrupted.
   bool get sdk => harness == 'sdk';
   final List<Subagent> subagents;
@@ -130,7 +134,8 @@ class Agent {
 
   /// Waits on the user: a dialog on screen, or an API error that will not
   /// clear by itself.
-  bool get needsYou => !ended && (status == 'blocked' || (stalled != null && !stalled!.transient));
+  bool get needsYou =>
+      !ended && (status == 'blocked' || waiting != null || (stalled != null && !stalled!.transient));
 
   /// The last part of the name; the rest is the leads above it.
   String get leaf => name.split('/').last;
@@ -159,6 +164,9 @@ class Agent {
       effort: json['effort'] is String ? json['effort'] as String : null,
       temp: json['temp'] == true,
       harness: json['harness'] is String ? json['harness'] as String : null,
+      waiting: json['waiting'] is Map && (json['waiting'] as Map)['text'] is String
+          ? (json['waiting'] as Map)['text'] as String
+          : null,
       drift: json['drift'] is Map && (json['drift'] as Map)['fits'] is num
           ? ((json['drift'] as Map)['fits'] as num).toDouble()
           : null,
