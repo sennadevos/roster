@@ -202,7 +202,10 @@ class HubClient {
         ..headers['Content-Type'] = 'application/octet-stream'
         ..contentLength = length;
       sending = _client.send(req);
-      await bytes.pipe(req.sink);
+      // Not bytes.pipe(req.sink): a picked file's stream is a Stream<Uint8List>,
+      // whose pipe wants a consumer of Uint8List and fails at run time.
+      await req.sink.addStream(bytes);
+      await req.sink.close();
     }
     final http.Response res;
     try {

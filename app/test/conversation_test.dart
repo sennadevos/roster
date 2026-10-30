@@ -138,7 +138,9 @@ void main() {
     final c = Conversation(hub.client(Uri.parse('https://hub'), 'tok-1'), 'a@m');
     await c.loadTail();
     final bytes = List<int>.generate(5000, (k) => k % 251);
-    final sending = c.send('look at this', files: [('clip.mp4', bytes.length, () => Stream.value(bytes))]);
+    // As a picked file streams on the phone: Uint8List chunks.
+    final sending = c.send('look at this',
+        files: [('clip.mp4', bytes.length, () => Stream<Uint8List>.fromIterable([Uint8List.fromList(bytes.sublist(0, 3000)), Uint8List.fromList(bytes.sublist(3000))]))]);
     expect(c.pending, ['look at this\n📎 1 file']);
     await sending;
     expect(uploads.single.$1, 'clip.mp4');
