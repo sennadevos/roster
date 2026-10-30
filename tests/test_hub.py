@@ -269,6 +269,20 @@ class HubTest(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertEqual(got["error"], "busy@hub1 has a dialog open; answer it with keys")
 
+    def test_upload(self):
+        data = bytes(range(256)) * 4096  # 1 MiB, more than the JSON limit
+        status, got = self.request("POST", "/v1/upload?agent=infra@hub1&name=clip.mp4", token=self.token, raw=data)
+        self.assertEqual(status, 200, got)
+        self.assertTrue(got["path"].endswith("-clip.mp4"))
+        with open(os.path.join(self.fake_dir, "put-file.bin"), "rb") as f:
+            self.assertEqual(f.read(), data)
+        call = [c for c in self.calls() if c["argv"][0] == "put-file"][-1]
+        self.assertEqual(call["argv"][1], "infra@hub1")
+        self.assertIn("--name=clip.mp4", call["argv"])
+        self.assertFalse(os.path.exists(call["argv"][2]))  # the hub's copy is gone afterwards
+        self.assertEqual(self.request("POST", "/v1/upload?agent=bad&name=x", token=self.token, raw=b"x")[0], 400)
+        self.assertEqual(self.request("POST", "/v1/upload?agent=infra@hub1&name=x", raw=b"x")[0], 401)
+
     def test_keys(self):
         status, _ = self.request("POST", "/v1/keys", {"agent": "infra@hub1", "keys": ["2", "Enter"]}, token=self.token)
         self.assertEqual(status, 200)

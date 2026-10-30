@@ -102,6 +102,8 @@ MAX_BODY = 256 * 1024
 # A prompt may carry photos (the app shrinks them first); only that route takes this much.
 MAX_PROMPT_BODY = 20 * 1024 * 1024
 MAX_IMAGES = 6
+# A file for an agent (POST /v1/upload): the raw body, streamed to disk.
+MAX_UPLOAD = 1024 * 1024 * 1024
 PING = 25
 DEBOUNCE = 0.3
 MAX_STREAMS = 32
@@ -736,6 +738,7 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ("GET", "/v1/transcript"): ("transcript", True),
         ("GET", "/v1/screen"): ("screen", True),
         ("POST", "/v1/prompt"): ("prompt", True),
+        ("POST", "/v1/upload"): ("upload", True),
         ("POST", "/v1/keys"): ("keys", True),
         ("POST", "/v1/answer"): ("answer", True),
         ("POST", "/v1/new"): ("new", True),
@@ -817,11 +820,14 @@ class Handler(http.server.BaseHTTPRequestHandler):
                     raise HttpError(405, "method not allowed")
                 raise HttpError(404, "not found")
             name, auth = route
-            length = self.body_length(method, MAX_PROMPT_BODY if name == "prompt" else MAX_BODY)
+            limit = {"prompt": MAX_PROMPT_BODY, "upload": MAX_UPLOAD}.get(name, MAX_BODY)
+            length = self.body_length(method, limit)
             self.device = None
             if auth:
                 self.device = self.authorize()
-            self.body = self.read_body(length)
+            # An upload's body is the file itself, read by r_upload as a stream.
+            self.length = length
+            self.body = {} if name == "upload" else self.read_body(length)
             result = getattr(self, "r_" + name)()
             if result is not None:
                 self.answer(200, result)
@@ -969,6 +975,31 @@ class Handler(http.server.BaseHTTPRequestHandler):
 
     def r_screen(self):
         return cli("screen", check_agent(self.arg("agent")), "--json", timeout=20, as_json=True)
+
+    def r_upload(self):
+        """POST /v1/upload?agent=A&name=N with the file as the raw body: kept on the
+        agent's machine (roster put-file); answers its path, for a prompt to name."""
+        agent = check_agent(self.arg("agent"))
+        name = check_text(self.arg("name"), "name", 200, oneline=True, required=True)
+        incoming = os.path.join(STATE, "incoming")
+        os.makedirs(incoming, mode=0o700, exist_ok=True)
+        fd, tmp = tempfile.mkstemp(dir=incoming, prefix="up-")
+        try:
+            left = self.length
+            with os.fdopen(fd, "wb") as f:
+                while left > 0:
+                    chunk = self.rfile.read(min(left, 1 << 20))
+                    if not chunk:
+                        raise HttpError(400, "the upload ended early")
+                    f.write(chunk)
+                    left -= len(chunk)
+            out = cli("put-file", agent, tmp, "--name=" + name, "--json", timeout=1800, as_json=True)
+        finally:
+            try:
+                os.remove(tmp)
+            except OSError:
+                pass
+        return {"path": out.get("path")}
 
     def r_prompt(self):
         """A prompt, with photos when `images` is [{"name", "data": base64}]: they are

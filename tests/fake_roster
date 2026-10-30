@@ -58,6 +58,12 @@ def main():
             fail("%s has a dialog open; answer it with keys" % argv[1])
     elif cmd in ("keys", "answer"):
         pass
+    elif cmd == "put-file":
+        # keep what arrived beside the calls, for the test to compare
+        with open(argv[2], "rb") as src, open(os.path.join(D, "put-file.bin"), "wb") as out:
+            out.write(src.read())
+        name = next(a.split("=", 1)[1] for a in argv if a.startswith("--name="))
+        print(json.dumps({"path": "/home/me/.cache/roster/uploads/%s/20261030-1-%s" % (argv[1].split("@")[0], name)}))
     elif cmd == "new":
         if "--brief" in argv:
             print(json.dumps({"agent": "fan-debug@laptop", "name": "fan-debug", "machine": "laptop", "cwd": "~/Desktop/fan-debug",

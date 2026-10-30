@@ -3236,6 +3236,7 @@ def live_tmux(name):
 UPLOADS = os.path.join(CACHE, "uploads")
 UPLOAD_TYPES = (".jpg", ".jpeg", ".png", ".gif", ".webp")
 UPLOAD_MAX = 10 * 1024 * 1024
+FILE_MAX = 1024 * 1024 * 1024  # any file (roster put-file): videos too
 
 
 def save_uploads(name, files):
@@ -3261,6 +3262,67 @@ def save_uploads(name, files):
             out.write(raw)
         paths.append(path)
     return paths
+
+
+def upload_path(name, filename):
+    """Where a file sent to an agent is kept on its machine: a fresh, safe name."""
+    d = os.path.join(UPLOADS, name.replace("/", "%"))
+    os.makedirs(d, exist_ok=True)
+    base = re.sub(r"[^A-Za-z0-9._-]+", "-", os.path.basename(str(filename or "file")))[-80:].strip("-.") or "file"
+    path = os.path.join(d, "%s-%s" % (time.strftime("%Y%m%d-%H%M%S"), base))
+    n = 2
+    while os.path.exists(path):
+        path = os.path.join(d, "%s-%d-%s" % (time.strftime("%Y%m%d-%H%M%S"), n, base))
+        n += 1
+    return path
+
+
+def receive_file(name, filename, src):
+    """Copy a stream into an agent's uploads; returns the path. Written under a
+    temporary name and renamed, so an agent never reads half a file."""
+    if not load(name):
+        raise Fail("no agent named %s on %s" % (name, machine()))
+    path = upload_path(name, filename)
+    tmp = path + ".part"
+    size = 0
+    with open(tmp, "wb") as out:
+        while True:
+            chunk = src.read(1 << 20)
+            if not chunk:
+                break
+            size += len(chunk)
+            if size > FILE_MAX:
+                out.close()
+                os.remove(tmp)
+                raise Fail("over %d MB" % (FILE_MAX // (1024 * 1024)))
+            out.write(chunk)
+    os.replace(tmp, path)
+    return path
+
+
+def cmd_put_file(args):
+    """A file for an agent, kept on its machine; prints where (for a prompt to name)."""
+    name, mach = split_target(args.agent)
+    check_name(name)
+    filename = args.name or os.path.basename(args.file)
+    with open(args.file, "rb") as src:
+        if mach in (None, machine()) and load(name):
+            path = receive_file(name, filename, src)
+        else:
+            where = locate(name, mach)
+            if where[0] == "local":
+                path = receive_file(name, filename, src)
+            else:
+                proc = subprocess.run(ssh_argv(peer(where[1]), "put-file", name, filename), stdin=src,
+                                      capture_output=True, timeout=3600)
+                try:
+                    got = json.loads(proc.stdout or b"{}")
+                except ValueError:
+                    got = {"error": (proc.stderr or b"").decode(errors="replace").strip()[-300:] or "no answer"}
+                if "error" in got:
+                    raise Fail("@%s: %s" % (where[1], got["error"]))
+                path = got["path"]
+    print(json.dumps({"path": path}) if args.json else path)
 
 
 def with_uploads(name, data):
@@ -3493,6 +3555,9 @@ def cmd_rpc(args):
             opt = lambda flag: rest[rest.index(flag) + 1] if flag in rest else None
             resume_in_tmux(e, opt("--model"), opt("--effort"), opt("--harness"))
             out = {"name": e["name"], "cwd": short_path(e["cwd"])}
+        elif verb == "put-file":
+            # The file itself is stdin, raw: no JSON around it.
+            out = {"path": receive_file(check_name(rest[0]), rest[1], sys.stdin.buffer)}
         elif verb == "goals":
             p = json.load(sys.stdin)
             out = run_goals(p.get("args") or [], p.get("stdin"), p.get("agent")) or {
@@ -4370,6 +4435,13 @@ def main():
     s.add_argument("--dry-run", action="store_true", help="only say where Jev would send it")
     s.add_argument("--json", action="store_true")
     s.set_defaults(fn=cmd_capture)
+
+    s = sub.add_parser("put-file", help="give an agent a file: kept on its machine, the path printed")
+    s.add_argument("agent", help="name or name@machine")
+    s.add_argument("file")
+    s.add_argument("--name", help="the file's name there (default: its name here)")
+    s.add_argument("--json", action="store_true")
+    s.set_defaults(fn=cmd_put_file)
 
     s = sub.add_parser("goals", help="Senna's goals (wsw-roster's goals CLI), wherever it is installed",
                        description="Runs `goals ARGS...` here, or on the peer that has it; see `roster goals --help` "
