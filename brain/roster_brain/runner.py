@@ -42,6 +42,7 @@ from claude_agent_sdk import (  # noqa: E402
     AssistantMessage,
     ClaudeAgentOptions,
     ClaudeSDKClient,
+    HookMatcher,
     PermissionResultAllow,
     PermissionResultDeny,
     RateLimitEvent,
@@ -130,6 +131,46 @@ def tool_summary(name, inp):
         if isinstance(inp.get(key), str) and inp[key].strip():
             return inp[key].strip().splitlines()[0][:200]
     return json.dumps(inp, ensure_ascii=False)[:200]
+
+
+# --- gates ------------------------------------------------------------------
+# Tool calls that reach other people as Senna wait for Senna's yes, whatever the
+# permission mode: the runner's PreToolUse hook opens a dialog, which the hub
+# pushes to the phone and app. It catches honest sends; an agent holding the
+# token can still get round it, so it is a notice, not a security boundary.
+
+KCHAT_WRITE_TOOLS = ("kchat_post_message", "kchat_reply_to_thread", "kchat_send_direct_message", "kchat_add_reaction")
+KCHAT_HOST = re.compile(r"kchat\.infomaniak\.com", re.I)
+HTTP_WRITE = re.compile(r"-X\s*['\"]?(POST|PUT|PATCH|DELETE)|--request\s+(POST|PUT|PATCH|DELETE)|(^|\s)(-d|--data\S*|--json|-F|--form)(\s|=)"
+                        r"|method\s*=\s*['\"](POST|PUT|PATCH|DELETE)|\bdata\s*=|\bjson\s*=|\.(post|put|patch|delete)\(", re.I)
+DATA_FILE = re.compile(r"(?:-d|--data\S*|--json)\s+['\"]?@([^\s'\"]+)")
+
+
+def kchat_message(cmd):
+    """The message text of a kChat send in a shell command, when it is in a file it posts."""
+    for path in DATA_FILE.findall(cmd):
+        try:
+            with open(os.path.expanduser(path)) as f:
+                body = json.load(f)
+        except (OSError, ValueError):
+            continue
+        if isinstance(body, dict) and isinstance(body.get("message"), str):
+            return body["message"]
+    return None
+
+
+def gate_of(tool, inp):
+    """(title, detail) when this call must wait for Senna, else None."""
+    inp = inp or {}
+    if tool.startswith("mcp__") and tool.rsplit("__", 1)[-1] in KCHAT_WRITE_TOOLS:
+        verb = tool.rsplit("__", 1)[-1].replace("kchat_", "").replace("_", " ")
+        where = inp.get("channel_id") or inp.get("user_id") or inp.get("username") or inp.get("post_id") or ""
+        text = inp.get("message") or inp.get("text") or inp.get("emoji_name") or ""
+        return "kChat, as you: %s %s" % (verb, where), str(text)
+    cmd = inp.get("command") if tool == "Bash" else None
+    if isinstance(cmd, str) and KCHAT_HOST.search(cmd) and HTTP_WRITE.search(cmd):
+        return "kChat, as you: a write from the shell", kchat_message(cmd) or cmd.strip()[:1500]
+    return None
 
 
 def block_text(content):
@@ -533,6 +574,22 @@ class Runner:
         msg = (text or "").strip() or "The user declined this tool call."
         return PermissionResultDeny(message=msg, interrupt=key == "escape")
 
+    async def gate(self, data, tool_use_id, ctx):
+        """PreToolUse hook: a call gate_of names waits for Senna's yes."""
+        g = gate_of(data.get("tool_name") or "", data.get("tool_input"))
+        if not g:
+            return {}
+        title, detail = g
+        options = [{"key": "1", "label": "Send", "detail": detail},
+                   {"key": "2", "label": "Don't send, and tell Claude why", "input": True, "text": ""}]
+        key, text = await self.open_dialog(title, options)
+        if key == "1":
+            decision, why = "allow", "Senna approved this send."
+        else:
+            decision, why = "deny", (text or "").strip() or "Senna did not approve this send."
+        return {"hookSpecificOutput": {"hookEventName": "PreToolUse", "permissionDecision": decision,
+                                       "permissionDecisionReason": why}}
+
     async def ask_questions(self, inp):
         answers = {}
         for q in inp.get("questions") or []:
@@ -571,6 +628,8 @@ class Runner:
             # the SDK's 1 MiB default then ends the session.
             max_buffer_size=MAX_BUFFER,
             can_use_tool=self.can_use_tool,
+            # Waits as long as Senna takes to answer.
+            hooks={"PreToolUse": [HookMatcher(hooks=[self.gate], timeout=7 * 86400)]},
             stderr=lambda line: None,
         )
         if self.started:
