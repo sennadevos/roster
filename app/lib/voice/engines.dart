@@ -73,9 +73,11 @@ class PhoneSpeechInput implements SpeechInput {
         partialResults: true,
         cancelOnError: true,
         autoPunctuation: true,
-        // A pause this long ends what was said, and so sends it.
-        pauseFor: const Duration(seconds: 3),
-        listenFor: const Duration(minutes: 2),
+        // A pause this long ends a round of listening. It no longer sends
+        // anything - the words are kept and listening starts again - so it can
+        // be long: fewer restarts means fewer clipped first syllables.
+        pauseFor: const Duration(seconds: 10),
+        listenFor: const Duration(minutes: 5),
       ),
     );
     return c.future;

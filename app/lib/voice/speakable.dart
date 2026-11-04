@@ -82,3 +82,12 @@ String _words(String s) => s
     .replaceAll(RegExp(r'[^\p{L}\p{N}\s]', unicode: true), ' ')
     .replaceAll(RegExp(r'\s+'), ' ')
     .trim();
+
+/// `"… and that is it, over."` -> `"… and that is it"`, or null when the words
+/// do not end that way. Saying "over" is how he hands the turn over out loud;
+/// anything else, including "over" in the middle of a sentence, is just words.
+String? endsWithOver(String said) {
+  final m = RegExp(r'^(.*?)[\s,]*\bover\b[\s.!?]*$', caseSensitive: false, dotAll: true).firstMatch(said.trim());
+  final rest = m?.group(1)?.trim();
+  return rest == null || rest.isEmpty ? null : rest;
+}

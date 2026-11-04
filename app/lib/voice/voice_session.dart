@@ -9,12 +9,17 @@ import 'speakable.dart';
 
 enum VoiceState { off, starting, listening, sending, waiting, speaking }
 
-/// A hands-free conversation with one agent: listen, send when the user
-/// pauses, read Claude's text aloud as it comes (not its tool calls), and
-/// listen again once the turn is over. A question from the agent is read
-/// out with its options, and a spoken answer picks one.
+/// A hands-free conversation with one agent: listen, read Claude's text aloud
+/// as it comes (not its tool calls), and listen again once the turn is over. A
+/// question from the agent is read out with its options, and a spoken answer
+/// picks one.
 ///
-/// It stops by itself after two silences in a row, and on [stop].
+/// A pause sends nothing. Stopping to think mid-sentence is normal, and a
+/// recognizer that submits the moment the talking stops makes that impossible:
+/// what is heard is collected in [draft] across as many pauses as he likes. It
+/// goes when he says so - the send button, or the word "over" at the end of a
+/// sentence, the way it is said on a radio. Holding the mic button captures
+/// while held, for when he wants to be certain nothing is missed.
 class VoiceSession extends ChangeNotifier {
   VoiceSession({
     required this.conversation,
@@ -37,8 +42,18 @@ class VoiceSession extends ChangeNotifier {
 
   VoiceState state = VoiceState.off;
 
-  /// What the recognizer hears right now.
+  /// What the recognizer hears in the round running now.
   String heard = '';
+
+  /// Everything heard since the last send, pauses and all. Nothing leaves on
+  /// its own; this is what goes when he sends.
+  String draft = '';
+
+  /// All there is to send: what was collected, plus the round in progress.
+  String get pending => [draft, heard].where((s) => s.trim().isNotEmpty).join(' ').trim();
+
+  /// Held down rather than left running: it listens while the button is held.
+  bool holding = false;
 
   /// Why it stopped, or a passing problem, for the bar to show.
   String? note;
@@ -49,7 +64,6 @@ class VoiceSession extends ChangeNotifier {
   bool _sawWorking = false;
   bool _dialogSaid = false;
   bool _lastFetched = false;
-  int _silences = 0;
   bool _attached = false;
 
   bool get active => state != VoiceState.off;
@@ -73,7 +87,7 @@ class VoiceSession extends ChangeNotifier {
       changes.addListener(_update);
       _attached = true;
     }
-    _silences = 0;
+    draft = '';
     // Only what Claude writes from now on is read out.
     _spoken.addAll(conversation.messages.map((m) => m.key));
     final r = row();
@@ -87,6 +101,9 @@ class VoiceSession extends ChangeNotifier {
 
   Future<void> stop({String? why}) async {
     note = why;
+    draft = '';
+    heard = '';
+    holding = false;
     _toSay.clear();
     _set(VoiceState.off);
     await input.stop();
@@ -102,6 +119,9 @@ class VoiceSession extends ChangeNotifier {
     unawaited(_listen());
   }
 
+  /// Listens, round after round. A round ends when the recognizer decides the
+  /// talking stopped; its words are kept and the next round starts. Nothing is
+  /// sent from here: a pause is a pause.
   Future<void> _listen() async {
     if (!active) return;
     heard = '';
@@ -110,14 +130,53 @@ class VoiceSession extends ChangeNotifier {
       heard = w;
       notifyListeners();
     });
-    if (state != VoiceState.listening) return; // stopped meanwhile
-    heard = said;
-    if (said.isEmpty) {
-      if (++_silences >= 2) return stop(why: 'Stopped after two silences. Tap the mic to talk again.');
-      return _listen();
+    if (state != VoiceState.listening) return; // sent, interjected or stopped meanwhile
+    if (said.trim().isNotEmpty) {
+      draft = [draft, said.trim()].where((s) => s.isNotEmpty).join(' ');
     }
-    _silences = 0;
-    await _heard(said);
+    heard = '';
+    notifyListeners();
+    // "over" at the end is him handing the turn over, as on a radio
+    final over = endsWithOver(draft);
+    if (over != null) {
+      draft = over;
+      return send();
+    }
+    if (holding) return;    // held: the next round starts when he presses again
+    return _listen();
+  }
+
+  /// Sends what has been collected, and nothing else does.
+  Future<void> send() async {
+    final text = pending;
+    if (text.isEmpty) return;
+    draft = '';
+    heard = text;
+    holding = false;
+    await input.stop();
+    await _heard(text);
+  }
+
+  /// Throws away what was heard, without sending, and keeps listening.
+  void clear() {
+    draft = '';
+    heard = '';
+    notifyListeners();
+    if (state == VoiceState.listening && !holding) unawaited(input.stop());
+  }
+
+  /// Push to talk: it listens while the button is held, so nothing is cut off
+  /// by a pause, and keeps what it heard when the button comes up.
+  Future<void> hold() async {
+    holding = true;
+    if (state == VoiceState.listening) return;
+    if (!active) return start();
+    if (state == VoiceState.speaking || state == VoiceState.waiting) return interject();
+  }
+
+  Future<void> release() async {
+    holding = false;
+    if (state == VoiceState.listening) await input.stop();
   }
 
   Future<void> _heard(String said) async {

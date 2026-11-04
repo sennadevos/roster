@@ -87,7 +87,7 @@ void main() {
     expect(speakDialog(d), contains('Or say your own answer.'));
   });
 
-  test('the loop: hear, send, read the reply aloud, listen again, stop after two silences', () async {
+  test('a pause sends nothing: what is heard collects until he sends it', () async {
     var transcript = <Map<String, dynamic>>[
       {'i': 1, 'role': 'assistant', 'text': 'Earlier words, never read out.'},
     ];
@@ -108,13 +108,20 @@ void main() {
     await conv.loadTail();
     var row = agent('idle');
     final changes = ChangeNotifier();
-    final input = ScriptedInput(['What changed today?']);
+    // three rounds with thinking in between, and nothing may leave on its own
+    final input = ScriptedInput(['What changed today', '', 'and what is left']);
     final output = RecordingOutput();
     final v = VoiceSession(conversation: conv, row: () => row, changes: changes, input: input, output: output);
 
     await v.start();
+    await until(() => v.draft.contains('what is left'));
+    expect(prompts, isEmpty, reason: 'a pause is a pause: it waits for him');
+    expect(v.draft, 'What changed today and what is left');
+
+    await v.send();
     await until(() => prompts.isNotEmpty);
-    expect(prompts, ['What changed today?']);
+    expect(prompts, ['What changed today and what is left']);
+    expect(v.draft, isEmpty);
     await until(() => v.state == VoiceState.waiting);
 
     // The agent works and writes; then the turn ends.
@@ -124,18 +131,52 @@ void main() {
     await conv.fetchNew();
     await until(() => output.said.isNotEmpty);
     expect(output.said, ['Two fixes landed.']);
-    // Its last words come in only with the end of the turn.
     transcript = [...transcript, {'i': 12, 'role': 'assistant', 'text': 'All tests pass.'}];
     row = agent('idle');
     changes.notifyListeners();
     await until(() => output.said.length == 2);
     expect(output.said.last, 'All tests pass.');
 
-    // Listening again, it hears nothing twice and stops.
-    await until(() => v.state == VoiceState.off);
-    expect(input.listens, 3);
-    expect(v.note, contains('two silences'));
+    // It is listening again, and stays listening however long he says nothing.
+    await until(() => v.state == VoiceState.listening);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+    expect(v.state, VoiceState.listening);
+    expect(prompts.length, 1);
+    await v.stop();
     v.dispose();
+  });
+
+  test('saying over sends it, and the word itself does not go along', () async {
+    final prompts = <String>[];
+    final hub = FakeHub({
+      'GET /v1/transcript': (_, _) => {'agent': 'a@m', 'session_id': 's', 'messages': [], 'next': 0},
+      'POST /v1/prompt': (b, _) {
+        prompts.add(b['text'] as String);
+        return {'ok': true};
+      },
+    });
+    final conv = Conversation(hub.client(Uri.parse('https://hub'), 'tok-1'), 'a@m');
+    await conv.loadTail();
+    final v = VoiceSession(
+      conversation: conv,
+      row: () => agent('idle'),
+      changes: ChangeNotifier(),
+      input: ScriptedInput(['let us use the Beeliners board', 'for the first batch, over']),
+      output: RecordingOutput(),
+    );
+    await v.start();
+    await until(() => prompts.isNotEmpty);
+    expect(prompts.single, 'let us use the Beeliners board for the first batch');
+    await v.stop();
+    v.dispose();
+  });
+
+  test('"over" only at the end, and only as a word of its own', () {
+    expect(endsWithOver('that is the plan, over'), 'that is the plan');
+    expect(endsWithOver('that is the plan over.'), 'that is the plan');
+    expect(endsWithOver('go over the numbers again'), isNull);
+    expect(endsWithOver('the overview is fine'), isNull);
+    expect(endsWithOver('over'), isNull, reason: 'nothing said yet');
   });
 
   test('a question from the agent is read out and answered by voice', () async {
@@ -160,8 +201,11 @@ void main() {
         conversation: conv, row: () => agent('blocked'), changes: changes, input: ScriptedInput(['yes']), output: output);
 
     await v.start();
+    await until(() => v.draft == 'yes');
+    expect(keys, isEmpty, reason: 'an answer waits for him too');
+    await v.send();
     await until(() => keys.isNotEmpty);
-    expect(output.said.single, 'Allow Bash: rm -rf build? 1: Yes. 2: No.');
+    expect(output.said.first, 'Allow Bash: rm -rf build? 1: Yes. 2: No.');
     expect(keys.single, ['1']);
     await v.stop();
     v.dispose();
