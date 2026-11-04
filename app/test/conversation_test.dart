@@ -119,6 +119,19 @@ void main() {
     expect(UserBubble.shown(c.messages.last.text), 'what is this?\n\n📷 cat.jpg');
   });
 
+  test('mail is its own line with the sender, not something Senna said', () {
+    expect(MailLine.sender('[roster] You have mail from print-lab/workbench-software.'),
+        'print-lab/workbench-software');
+    // the roster names the machine too; the line says who, not where
+    expect(MailLine.sender('[roster] You have mail from peltier-frame-bundle@srv-agents-01.'),
+        'peltier-frame-bundle');
+    expect(MailLine.rest('[roster] You have mail from a.\nread it with roster inbox'),
+        'read it with roster inbox');
+    // what he actually typed stays a bubble, including a message about mail
+    expect(MailLine.sender('did you get the mail from kdrive-reorg?'), isNull);
+    expect(MailLine.sender('[roster] You have 2 unread.'), isNull);
+  });
+
   test('a prompt with a file: uploaded first, raw, then named in the prompt', () async {
     final uploads = <(String, List<int>)>[];
     String? prompted;

@@ -130,6 +130,9 @@ function transcriptFor(agent) {
     }
     push({ role: 'assistant', text: r % 3 === 0 ? longReply : `Updated \`status.dart\`: each status now has a colour that reads in both themes, and *working* pulses gently.\n\nNext I'll wire the search field to \`/\`.` });
   }
+  // mail from another agent: delivered as a user turn, shown as a mail line
+  push({ role: 'user', text: `[roster] You have mail from print-lab/workbench-software.` });
+  push({ role: 'assistant', text: 'Noted: the workbench build is on the pi now.' });
   if (agent.startsWith('rator-firmware/ui') || agent.startsWith('roster/app')) {
     push({ role: 'user', text: 'Before you change the settings screen: ask me what I want there.' });
     push({ role: 'tool', tool: 'AskUserQuestion', text: '2 questions', result: null });

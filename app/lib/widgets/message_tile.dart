@@ -134,6 +134,72 @@ class UserBubble extends StatelessWidget {
   }
 }
 
+/// Mail delivered to the agent by the roster. It arrives in the transcript as
+/// a user turn, because that is how the agent is told, but Senna did not write
+/// it: it is traffic from another agent and reads as its own line with the
+/// sender on it, never as a bubble from him.
+class MailLine extends StatelessWidget {
+  const MailLine(this.text, {super.key});
+
+  final String text;
+
+  /// `[roster] You have mail from print-lab/workbench-software.` -> the sender,
+  /// without the machine it sits on. Null when this is not a mail delivery.
+  static String? sender(String text) {
+    final m = RegExp(r'^\[roster\]\s+You have mail from\s+([^\n.]+?)\.?\s*$', multiLine: true)
+        .firstMatch(text.trim());
+    final who = m?.group(1)?.trim();
+    return who == null || who.isEmpty ? null : who.split('@').first;
+  }
+
+  /// Anything the roster added under the delivery line, which is usually
+  /// nothing: kept so no part of a delivery is silently dropped.
+  static String rest(String text) {
+    final lines = text.trim().split('\n');
+    return lines.length < 2 ? '' : lines.sublist(1).join('\n').trim();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    final who = sender(text) ?? 'another agent';
+    final more = rest(text);
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(20, 6, 20, 6),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Padding(
+            padding: const EdgeInsets.only(top: 2),
+            child: Icon(Icons.mail_outline, size: 14, color: cs.outline),
+          ),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SelectableText(
+                  'mail from $who',
+                  onSelectionChanged: (sel, _) => _selected('mail from $who', sel),
+                  style: theme.textTheme.bodySmall?.copyWith(color: cs.onSurfaceVariant),
+                ),
+                if (more.isNotEmpty)
+                  SelectableText(
+                    more,
+                    maxLines: 6,
+                    onSelectionChanged: (sel, _) => _selected(more, sel),
+                    style: theme.textTheme.bodySmall?.copyWith(color: cs.outline),
+                  ),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// Something that happened rather than was said: a background task's
 /// summary, a slash command's output, a compaction. A quiet line of its own.
 class EventLine extends StatelessWidget {

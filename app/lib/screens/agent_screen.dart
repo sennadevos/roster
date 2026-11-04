@@ -649,6 +649,9 @@ class _AgentScreenState extends State<AgentScreen> {
         }
         final key = 'g/${run.first.key}';
         out.add(_Item(key, [for (final r in run) r.key], () => ToolGroup(run, key: ValueKey(key))));
+      } else if (m.role == 'user' && MailLine.sender(m.text) != null) {
+        // mail is agent-to-agent traffic: it is shown, but not as something Senna said
+        out.add(_Item(m.key, [m.key], () => StayPut(child: MailLine(m.text, key: ValueKey(m.key)))));
       } else if (m.role == 'user') {
         out.add(_Item(m.key, [m.key],
             () => StayPut(child: UserBubble(m.text, key: ValueKey(m.key), queued: m.queued, withdrawn: m.withdrawn))));
