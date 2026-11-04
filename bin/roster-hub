@@ -398,6 +398,43 @@ def check_int(value, what, lo, hi):
     return n
 
 
+def check_model(value):
+    model = check_text(value, "model", 200, oneline=True, required=True)
+    if not re.fullmatch(r"[A-Za-z0-9._:/~\[\]-]+", model):
+        raise HttpError(400, "bad model name")
+    return model
+
+
+def chats_cli(*args, stdin=None, timeout=60, as_json=True):
+    """`roster chats ARGS --json`. The chats CLI says no with exit 1 and a line on
+    stderr: a 400 with that line. No chats CLI anywhere reachable: a 503."""
+    argv = [roster_bin(), "chats", "--", *args] + (["--json"] if as_json else [])
+    try:
+        proc = subprocess.run(argv, input=stdin, stdin=subprocess.DEVNULL if stdin is None else None,
+                              capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        raise HttpError(504, "chats %s did not answer within %ds" % (args[0], timeout))
+    except OSError as exc:
+        log("cannot run %s: %s" % (argv[0], exc))
+        raise HttpError(502, "cannot run roster")
+    if proc.returncode != 0:
+        lines = [l for l in proc.stderr.splitlines() if l.strip()]
+        last = lines[-1] if lines else ""
+        if last.startswith("roster: no chats CLI"):
+            raise HttpError(503, "the chats store is not reachable (is its machine awake?)")
+        if proc.returncode == 1 and last:
+            raise HttpError(400, last[len("roster: "):] if last.startswith("roster: ") else last[:500])
+        log("roster chats %s exited %d: %s" % (args[0], proc.returncode, proc.stderr.strip()[-2000:]))
+        raise HttpError(502, "chats %s failed (exit %d)" % (args[0], proc.returncode))
+    if not as_json:
+        return proc.stdout
+    try:
+        return json.loads(proc.stdout)
+    except ValueError:
+        log("chats %s gave no JSON: %r" % (args[0], proc.stdout[:500]))
+        raise HttpError(502, "chats %s gave no JSON" % args[0])
+
+
 def check_endpoint(value, allowed):
     """A UnifiedPush endpoint on an allowed push server: it is sent the ntfy token."""
     if value is None:
@@ -758,6 +795,16 @@ class Handler(http.server.BaseHTTPRequestHandler):
         ("GET", "/v1/devices"): ("devices", True),
         ("DELETE", "/v1/devices/*"): ("delete_device", True),
         ("GET", "/v1/events"): ("events", True),
+        # Senna's chats with models, through `roster chats` (wsw-roster's chats CLI).
+        ("GET", "/v1/chats"): ("chats", True),
+        ("POST", "/v1/chats"): ("chat_new", True),
+        ("GET", "/v1/chats/*"): ("chat_show", True),
+        ("PATCH", "/v1/chats/*"): ("chat_patch", True),
+        ("DELETE", "/v1/chats/*"): ("chat_delete", True),
+        ("POST", "/v1/chats/*/say"): ("chat_say", True),
+        ("POST", "/v1/chats/*/edit"): ("chat_edit", True),
+        ("GET", "/v1/chats/*/render"): ("chat_render", True),
+        ("GET", "/v1/models"): ("models", True),
     }
 
     def do_GET(self):
@@ -819,13 +866,18 @@ class Handler(http.server.BaseHTTPRequestHandler):
             self.path_id = None
             if path.startswith("/v1/devices/"):
                 self.path_id, path = path[len("/v1/devices/"):], "/v1/devices/*"
+            elif path.startswith("/v1/chats/"):
+                m = re.fullmatch(r"/v1/chats/([^/]+)(/say|/edit|/render)?", path)
+                if not m or not m.group(1).isdigit() or len(m.group(1)) > 12:
+                    raise HttpError(404, "not found")
+                self.path_id, path = m.group(1), "/v1/chats/*" + (m.group(2) or "")
             route = self.ROUTES.get((method, path))
             if route is None:
                 if any(p == path for _, p in self.ROUTES):
                     raise HttpError(405, "method not allowed")
                 raise HttpError(404, "not found")
             name, auth = route
-            limit = {"prompt": MAX_PROMPT_BODY, "upload": MAX_UPLOAD}.get(name, MAX_BODY)
+            limit = {"prompt": MAX_PROMPT_BODY, "chat_new": MAX_PROMPT_BODY, "upload": MAX_UPLOAD}.get(name, MAX_BODY)
             length = self.body_length(method, limit)
             self.device = None
             if auth:
@@ -1162,6 +1214,83 @@ class Handler(http.server.BaseHTTPRequestHandler):
         cli("effort", agent, effort, timeout=20)
         self.hub.wake.set()
         return {"ok": True, "effort": effort}
+
+    # -- chats: Senna's chats with models (wsw-roster's chats CLI, wherever it is) --
+
+    def r_chats(self):
+        return chats_cli("list")
+
+    def r_chat_show(self):
+        return chats_cli("show", self.path_id)
+
+    def r_chat_new(self):
+        args = ["new"]
+        model = self.body.get("model")
+        if model is not None:
+            args += ["--model", check_model(model)]
+        title = check_text(self.body.get("title"), "title", 200, oneline=True)
+        if title is not None:
+            args += ["--title", title]
+        agent = self.body.get("from_agent")
+        if agent is not None:
+            args += ["--from-agent", check_agent(agent)]
+        stdin = None
+        messages = self.body.get("messages")
+        if messages is not None:
+            if not isinstance(messages, list) or not all(
+                    isinstance(m, dict) and m.get("role") in ("user", "assistant")
+                    and isinstance(m.get("text"), str) for m in messages):
+                raise HttpError(400, "messages must be a list of {role: user|assistant, text}")
+            args += ["--messages", "-"]
+            stdin = json.dumps([{"role": m["role"], "text": m["text"]} for m in messages], ensure_ascii=False)
+        return chats_cli(*args, stdin=stdin)
+
+    def r_chat_say(self):
+        text = check_text(self.body.get("text"), "text", 64 * 1024, required=True)
+        # A slow model can take a minute or more to answer.
+        return chats_cli("say", self.path_id, "-", stdin=text, timeout=240)
+
+    def r_chat_edit(self):
+        message = check_int(self.body.get("message"), "message", 0, 10 ** 9)
+        text = check_text(self.body.get("text"), "text", 64 * 1024, required=True)
+        return chats_cli("edit", self.path_id, str(message), "-", stdin=text)
+
+    def r_chat_patch(self):
+        """Any of model, title and params ({effort, temperature, max_tokens}); the chat as it is after."""
+        b, cid = self.body, self.path_id
+        if b.get("model") is not None:
+            chats_cli("model", cid, check_model(b["model"]))
+        if b.get("title") is not None:
+            chats_cli("title", cid, check_text(b["title"], "title", 200, oneline=True, required=True))
+        params = b.get("params")
+        if params is not None:
+            if not isinstance(params, dict):
+                raise HttpError(400, "params must be an object")
+            args = []
+            if params.get("effort") is not None:
+                if params["effort"] not in EFFORTS:
+                    raise HttpError(400, "effort is one of %s" % ", ".join(EFFORTS))
+                args += ["--effort", params["effort"]]
+            if params.get("temperature") is not None:
+                t = params["temperature"]
+                if not isinstance(t, (int, float)) or isinstance(t, bool) or not 0 <= t <= 2:
+                    raise HttpError(400, "temperature must be a number from 0 to 2")
+                args += ["--temperature", str(t)]
+            if params.get("max_tokens") is not None:
+                args += ["--max-tokens", str(check_int(params["max_tokens"], "max_tokens", 1, 1_000_000))]
+            if args:
+                chats_cli("params", cid, *args)
+        return chats_cli("show", cid)
+
+    def r_chat_delete(self):
+        chats_cli("delete", self.path_id)
+        return {"ok": True}
+
+    def r_chat_render(self):
+        return {"text": chats_cli("render", self.path_id, as_json=False)}
+
+    def r_models(self):
+        return chats_cli("models")
 
     def r_push(self):
         if "endpoint" not in self.body:

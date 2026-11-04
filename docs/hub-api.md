@@ -91,6 +91,22 @@ An agent row's `harness` says what runs it: `sdk` (roster's Agent SDK runner, do
 
 The hub runs the CLI as `roster <command> … --json` (path from `ROSTER_BIN`, default `~/.local/bin/roster`) with a timeout, and passes its errors on as 4xx (`roster: …` text as `error`).
 
+### Chats
+
+Senna's chats with models live in wsw-roster's store on one machine (`chats_bin` in that machine's `config.toml`); the hub reaches them through `roster chats -- ARGS --json`, which runs the `chats` CLI there. Answers are that CLI's JSON as it is; its refusals (exit 1) are a 400 with its last stderr line, and a 503 means no reachable machine has the store (asleep or off).
+
+| Method and path | Body | Answer |
+|---|---|---|
+| `GET /v1/chats` | | `chats list` |
+| `POST /v1/chats` | `{"model"?, "title"?, "from_agent"?, "messages"?: [{"role": "user"\|"assistant", "text"}]}`: with `from_agent` and `messages`, a chat seeded with an agent's conversation (the agent is left alone); up to 20 MiB | `chats new` |
+| `GET /v1/chats/{id}` | | `chats show` |
+| `PATCH /v1/chats/{id}` | any of `{"model", "title", "params": {"effort", "temperature" (0–2), "max_tokens"}}` | the chat after, as `chats show` |
+| `DELETE /v1/chats/{id}` | | `{"ok": true}` |
+| `POST /v1/chats/{id}/say` | `{"text"}`: the whole history goes to the model; can take a minute or more on a slow model (the hub waits up to 240 s) | `{"text", "cost", "model"}` |
+| `POST /v1/chats/{id}/edit` | `{"message": n, "text"}` | `chats edit` |
+| `GET /v1/chats/{id}/render` | | `{"text"}`: the chat as text, for an agent to absorb (with `POST /v1/new` or `/v1/prompt`) |
+| `GET /v1/models` | | `chats models` |
+
 ### Events: `GET /v1/events` (text/event-stream)
 
 - `event: agents` with `data: <same JSON as GET /v1/agents>`, sent on connect and after every change (the hub follows `roster events --all`, debounced 300 ms, and only sends when the list differs).

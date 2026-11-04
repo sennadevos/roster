@@ -73,6 +73,17 @@ def main():
         on = next(a.split("=", 1)[1] for a in argv if a.startswith("--on="))
         print(json.dumps({"agent": "%s@%s" % (name, on), "name": name, "machine": on,
                           "cwd": "~/src" if on == "hub1" else "/home/me"}))
+    elif cmd == "chats":
+        args = argv[2:-1] if argv[-1] == "--json" else argv[2:]
+        if args[:2] == ["show", "404"]:
+            print("no chat 404", file=sys.stderr)
+            sys.exit(1)
+        if args[:1] == ["render"]:
+            print("user: hi\nassistant: hello")
+        elif args[:1] == ["say"]:
+            print(json.dumps({"text": "hello", "cost": 0.001, "model": "m"}))
+        else:
+            print(json.dumps({"args": args}))
     elif cmd in ("resume", "kill"):
         if argv[1].startswith("nobody@"):
             fail("no agent named nobody on the roster")

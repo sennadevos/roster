@@ -1916,29 +1916,33 @@ def drift_report():
         print("  %s %-40s fits %.2f%s" % (l["at"][:16], l["agent"], l["fits"], "  flagged" if l["flagged"] else ""))
 
 
-# --- goals: Senna's work packages, through wsw-roster's `goals` CLI -----------
+# --- goals and chats: wsw-roster's CLIs, wherever they are --------------------
 #
-# The goals live in wsw-roster's database on one machine, and only its `goals`
-# CLI touches them. roster only carries the call: `roster goals ARGS...` runs
-# `goals ARGS...` here when the CLI is here (or config.toml's goals_bin), else
-# on the first peer that has it, and hands back its stdout, stderr and exit
-# code untouched. The caller's roster name goes along as ROSTER_AGENT, so a
-# claim made from another machine names the right agent.
+# Senna's goals and chats live in wsw-roster's database on one machine, and only
+# its `goals` and `chats` CLIs touch them. roster only carries the call:
+# `roster goals ARGS...` runs `goals ARGS...` here when the CLI is here (or
+# config.toml's goals_bin; chats_bin for chats), else on the first peer that has
+# it, and hands back its stdout, stderr and exit code untouched. The caller's
+# roster name goes along as ROSTER_AGENT, so a claim made from another machine
+# names the right agent.
+
+# How long one call may take: a chat's `say` waits on a slow model.
+PASS_TIMEOUT = {"goals": 90, "chats": 180}
 
 
-def goals_bin():
-    exe = config().get("goals_bin")
+def pass_bin(tool_name):
+    exe = config().get(tool_name + "_bin")
     if exe:
         return os.path.expanduser(exe)
     try:
-        return tool("goals")
+        return tool(tool_name)
     except Fail:
         return None
 
 
-def run_goals(argv, stdin_text, agent):
-    """The goals CLI here: {stdout, stderr, code}, or None when it is not here."""
-    exe = goals_bin()
+def run_pass(tool_name, argv, stdin_text, agent):
+    """The goals or chats CLI here: {stdout, stderr, code}, or None when it is not here."""
+    exe = pass_bin(tool_name)
     if not exe:
         return None
     env = dict(os.environ)
@@ -1946,14 +1950,14 @@ def run_goals(argv, stdin_text, agent):
         env["ROSTER_AGENT"] = agent
     try:
         proc = subprocess.run([exe] + [str(a) for a in argv], input=stdin_text, capture_output=True, text=True,
-                              timeout=90, env=env)
+                              timeout=PASS_TIMEOUT[tool_name], env=env)
     except (OSError, subprocess.TimeoutExpired) as exc:
-        raise Fail("goals: %s" % exc)
+        raise Fail("%s: %s" % (tool_name, exc))
     return {"stdout": proc.stdout, "stderr": proc.stderr, "code": proc.returncode}
 
 
-def cmd_goals(args):
-    argv = list(args.goal_args)
+def cmd_pass(tool_name, argv):
+    argv = list(argv)
     if argv[:1] == ["--"]:
         argv = argv[1:]
     # Long text comes as `-`; stdin is read only then, so nothing waits on it otherwise.
@@ -1963,22 +1967,31 @@ def cmd_goals(args):
         agent = "%s@%s" % (e["name"], machine()) if e else None
     except Fail:
         agent = None
-    got = run_goals(argv, stdin_text, agent)
+    got = run_pass(tool_name, argv, stdin_text, agent)
     if got is None:
         for m in peers():
             try:
-                answer = rpc(m, "goals", data={"args": argv, "stdin": stdin_text, "agent": agent}, timeout=120)
+                answer = rpc(m, tool_name, data={"args": argv, "stdin": stdin_text, "agent": agent},
+                             timeout=PASS_TIMEOUT[tool_name] + 30)
             except Fail:
                 continue
             if "code" in answer:
                 got = answer
                 break
     if got is None:
-        raise Fail("no goals CLI here or on a reachable peer (wsw-roster's `goals`)")
+        raise Fail("no %s CLI here or on a reachable peer (wsw-roster's `%s`)" % (tool_name, tool_name))
     sys.stdout.write(got["stdout"])
     sys.stderr.write(got["stderr"])
     sys.stdout.flush()
     sys.exit(got["code"])
+
+
+def cmd_goals(args):
+    cmd_pass("goals", args.goal_args)
+
+
+def cmd_chats(args):
+    cmd_pass("chats", args.chat_args)
 
 
 def model_args(model, effort):
@@ -3684,10 +3697,10 @@ def cmd_rpc(args):
         elif verb == "put-file":
             # The file itself is stdin, raw: no JSON around it.
             out = {"path": receive_file(check_name(rest[0]), rest[1], sys.stdin.buffer)}
-        elif verb == "goals":
+        elif verb in ("goals", "chats"):
             p = json.load(sys.stdin)
-            out = run_goals(p.get("args") or [], p.get("stdin"), p.get("agent")) or {
-                "error": "no goals CLI on %s" % machine()}
+            out = run_pass(verb, p.get("args") or [], p.get("stdin"), p.get("agent")) or {
+                "error": "no %s CLI on %s" % (verb, machine())}
         elif verb == "decisions":
             p = json.load(sys.stdin)
             out = decisions(p["state"], p["questions"]) or {"error": "no OpenRouter key on %s" % machine()}
@@ -4591,6 +4604,12 @@ def main():
                                    "passed through: roster goals -- --help")
     s.add_argument("goal_args", nargs=argparse.REMAINDER, metavar="ARGS")
     s.set_defaults(fn=cmd_goals)
+
+    s = sub.add_parser("chats", help="Senna's chats with models (wsw-roster's chats CLI), wherever it is installed",
+                       description="Runs `chats ARGS...` here, or on the peer that has it; "
+                                   "its own help: roster chats -- --help")
+    s.add_argument("chat_args", nargs=argparse.REMAINDER, metavar="ARGS")
+    s.set_defaults(fn=cmd_chats)
 
     s = sub.add_parser("compact-check", help=argparse.SUPPRESS)
     s.add_argument("name")

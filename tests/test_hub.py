@@ -329,6 +329,40 @@ class HubTest(unittest.TestCase):
         status, got = self.request("POST", "/v1/kill", {"agent": "nobody@hub1"}, token=self.token)
         self.assertEqual((status, got), (400, {"error": "no agent named nobody on the roster"}))
 
+    def test_chats(self):
+        t = self.token
+        self.assertEqual(self.request("GET", "/v1/chats", token=t), (200, {"args": ["list"]}))
+        self.assertEqual(self.request("GET", "/v1/chats/7", token=t), (200, {"args": ["show", "7"]}))
+        status, got = self.request("GET", "/v1/chats/404", token=t)
+        self.assertEqual((status, got["error"]), (400, "no chat 404"))
+        for bad in ("/v1/chats/x", "/v1/chats/7/nope", "/v1/chats/-1"):
+            self.assertEqual(self.request("GET", bad, token=t)[0], 404, bad)
+        self.assertEqual(self.request("GET", "/v1/chats", token=None)[0], 401)
+        status, got = self.request("POST", "/v1/chats/7/say", {"text": "hi there"}, token=t)
+        self.assertEqual((status, got), (200, {"text": "hello", "cost": 0.001, "model": "m"}))
+        self.assertIn({"argv": ["chats", "--", "say", "7", "-", "--json"], "stdin": "hi there"}, self.calls())
+        self.assertEqual(self.request("POST", "/v1/chats/7/edit", {"message": 3, "text": "better"}, token=t)[0], 200)
+        self.assertIn({"argv": ["chats", "--", "edit", "7", "3", "-", "--json"], "stdin": "better"}, self.calls())
+        msgs = [{"role": "user", "text": "a"}, {"role": "assistant", "text": "b"}]
+        status, got = self.request("POST", "/v1/chats", {"model": "anthropic/claude-x", "title": "T",
+                                                         "from_agent": "infra@hub1", "messages": msgs}, token=t)
+        self.assertEqual(status, 200)
+        self.assertEqual(got["args"], ["new", "--model", "anthropic/claude-x", "--title", "T", "--from-agent",
+                                       "infra@hub1", "--messages", "-"])
+        self.assertEqual(self.request("POST", "/v1/chats", {"model": "a b"}, token=t)[0], 400)
+        self.assertEqual(self.request("POST", "/v1/chats", {"messages": [{"role": "system", "text": "x"}]}, token=t)[0], 400)
+        status, got = self.request("PATCH", "/v1/chats/7", {"model": "m2", "title": "New",
+                                                            "params": {"effort": "low", "temperature": 0.5, "max_tokens": 900}}, token=t)
+        self.assertEqual((status, got), (200, {"args": ["show", "7"]}))
+        argvs = [c["argv"] for c in self.calls()]
+        for want in (["model", "7", "m2"], ["title", "7", "New"],
+                     ["params", "7", "--effort", "low", "--temperature", "0.5", "--max-tokens", "900"]):
+            self.assertIn(["chats", "--"] + want + ["--json"], argvs)
+        self.assertEqual(self.request("PATCH", "/v1/chats/7", {"params": {"temperature": 5}}, token=t)[0], 400)
+        self.assertEqual(self.request("DELETE", "/v1/chats/7", token=t), (200, {"ok": True}))
+        self.assertEqual(self.request("GET", "/v1/chats/7/render", token=t), (200, {"text": "user: hi\nassistant: hello\n"}))
+        self.assertEqual(self.request("GET", "/v1/models", token=t), (200, {"args": ["models"]}))
+
     def test_transcript_and_screen(self):
         status, got = self.request("GET", "/v1/transcript?agent=infra@hub1&after=4&limit=50", token=self.token)
         self.assertEqual(status, 200)
