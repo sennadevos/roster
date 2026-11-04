@@ -18,7 +18,9 @@ import '../theme.dart';
 import '../voice/engines.dart';
 import '../voice/voice_session.dart';
 import '../widgets/bits.dart';
+import '../models/chat.dart';
 import '../widgets/message_tile.dart';
+import 'chats_screen.dart';
 import '../widgets/status.dart';
 import '../widgets/voice_bar.dart';
 
@@ -384,6 +386,20 @@ class _AgentScreenState extends State<AgentScreen> {
         return;
       }
       switch (action) {
+        // A chat that starts where this agent is: its conversation becomes the
+        // history, and the agent carries on untouched. Nothing said in the chat
+        // reaches it unless the chat is handed over afterwards.
+        case 'fork':
+          final turns = [
+            for (final m in _conv.messages)
+              if ((m.role == 'user' || m.role == 'assistant') && m.text.trim().isNotEmpty)
+                ChatTurn(id: m.i, role: m.role, text: m.text),
+          ];
+          if (turns.isEmpty) {
+            if (mounted) showError(context, 'Nothing has been said here yet');
+            return;
+          }
+          if (mounted) await forkAgentIntoChat(context, widget.agent, turns);
         case 'interrupt':
           final did = await client.interrupt(widget.agent);
           if (mounted) showError(context, did ? 'Interrupted' : 'Nothing to interrupt');
@@ -974,6 +990,7 @@ class _Header extends StatelessWidget implements PreferredSizeWidget {
                       if (live) const PopupMenuItem(value: 'interrupt', child: Text('Interrupt')),
                       if (live) const PopupMenuItem(value: 'model:?', child: Text('Switch model…')),
                       if (ended) const PopupMenuItem(value: 'resume', child: Text('Resume')),
+                      const PopupMenuItem(value: 'fork', child: Text('Talk it over in a chat')),
                       if (!ended) const PopupMenuItem(value: 'kill', child: Text('Kill…')),
                     ],
                   ),

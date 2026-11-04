@@ -12,6 +12,7 @@ import '../theme.dart';
 import '../widgets/bits.dart';
 import '../widgets/status.dart';
 import 'agent_screen.dart';
+import 'chats_screen.dart';
 import 'capture_sheet.dart';
 import 'new_agent_sheet.dart';
 import 'settings_screen.dart';
@@ -534,14 +535,25 @@ class _AgentList extends StatelessWidget {
               tooltip: 'New agent',
               onPressed: () => showNewAgentSheet(context),
             ),
+          IconButton(
+            icon: const Icon(Icons.forum_outlined),
+            tooltip: 'Chats: talk to a model, with no agent behind it',
+            onPressed: () => Navigator.of(context).push(
+              MaterialPageRoute<void>(builder: (_) => const ChatsScreen()),
+            ),
+          ),
           PopupMenuButton<String>(
             tooltip: 'More',
             onSelected: (v) => switch (v) {
+              'chats' => Navigator.of(context).push(
+                  MaterialPageRoute<void>(builder: (_) => const ChatsScreen()),
+                ),
               'ended' => app.setShowEnded(!app.showEnded),
               'keys' => showShortcuts(context),
               _ => Navigator.of(context).push(MaterialPageRoute<void>(builder: (_) => const SettingsScreen())),
             },
             itemBuilder: (_) => [
+              const PopupMenuItem(value: 'chats', child: Text('Chats')),
               CheckedPopupMenuItem(value: 'ended', checked: app.showEnded, child: const Text('Show ended agents')),
               if (kIsWeb) const PopupMenuItem(value: 'keys', child: Text('Keyboard shortcuts')),
               const PopupMenuItem(value: 'settings', child: Text('Settings')),

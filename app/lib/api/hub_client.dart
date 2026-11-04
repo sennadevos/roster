@@ -6,6 +6,7 @@ import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:http/http.dart' as http;
 
 import '../models/agent.dart';
+import '../models/chat.dart';
 import '../models/misc.dart';
 import '../models/transcript.dart';
 import 'sse.dart';
@@ -172,6 +173,78 @@ class HubClient {
     // The hub plans it first (a headless Claude), and allows that 240 s.
     final json = await _send('POST', '/v1/new', body: {'brief': brief}, timeout: const Duration(seconds: 250));
     return ('${json['agent']}', (json['plan'] as Map?)?.cast<String, dynamic>() ?? const <String, dynamic>{});
+  }
+
+  // ---------------------------------------------------------------- chats
+  //
+  // A chat has no session on the other side: the hub forwards to the `chats`
+  // CLI on the machine that keeps the store, and the whole history goes to the
+  // model every turn. An answer can take a while, so these allow more time
+  // than anything else here - the hub itself waits up to 240 s for a say.
+
+  Future<List<Chat>> chats() async {
+    final json = await _send('GET', '/v1/chats');
+    return [
+      for (final c in (json['chats'] as List? ?? const []))
+        if (c is Map<String, dynamic>) Chat.fromJson(c),
+    ];
+  }
+
+  Future<ChatPage> chat(int id) async => ChatPage.fromJson(await _send('GET', '/v1/chats/$id'));
+
+  /// A new chat. [fromAgent] with [messages] forks an agent's conversation into
+  /// one: the agent is not touched, its words just become the history.
+  Future<Chat> newChat({String? model, String? title, String? fromAgent, List<ChatTurn> messages = const []}) async {
+    final json = await _send('POST', '/v1/chats', body: {
+      'model': ?model,
+      'title': ?title,
+      'from_agent': ?fromAgent,
+      if (messages.isNotEmpty)
+        'messages': [for (final m in messages) {'role': m.mine ? 'user' : 'assistant', 'text': m.text}],
+    }, timeout: const Duration(seconds: 90));
+    return Chat.fromJson(json);
+  }
+
+  /// Says something and waits for the answer.
+  Future<ChatTurn> say(int id, String text) async {
+    final json = await _send('POST', '/v1/chats/$id/say', body: {'text': text},
+        timeout: const Duration(seconds: 280));
+    return ChatTurn(
+      id: (json['turn'] as num?)?.toInt() ?? 0,
+      role: 'assistant',
+      text: json['text'] as String? ?? '',
+      cost: (json['cost'] as num?)?.toDouble(),
+      model: json['model'] as String?,
+      at: DateTime.now(),
+    );
+  }
+
+  /// Rewrites a message; everything after it goes, and the chat carries on
+  /// from there.
+  Future<void> editChat(int id, int message, String text) =>
+      _send('POST', '/v1/chats/$id/edit', body: {'message': message, 'text': text});
+
+  Future<Chat> patchChat(int id, {String? model, String? title, Map<String, dynamic>? params}) async =>
+      Chat.fromJson(await _send('PATCH', '/v1/chats/$id', body: {
+        'model': ?model,
+        'title': ?title,
+        'params': ?params,
+      }));
+
+  Future<void> deleteChat(int id) => _send('DELETE', '/v1/chats/$id');
+
+  /// The chat as text, for an agent to absorb.
+  Future<String> renderChat(int id) async {
+    final json = await _send('GET', '/v1/chats/$id/render');
+    return json['text'] as String? ?? '';
+  }
+
+  Future<List<ModelInfo>> models() async {
+    final json = await _send('GET', '/v1/models', query: null);
+    return [
+      for (final m in (json['models'] as List? ?? const []))
+        if (m is Map<String, dynamic>) ModelInfo.fromJson(m),
+    ];
   }
 
   Future<void> resume(String agent) =>
