@@ -75,6 +75,7 @@ abstract final class Keys {
   static const notifications = 'notifications';
   static const pushEndpoint = 'push_endpoint';
   static const theme = 'theme';
-  static const listView = 'list_view';
+  static const focused = 'focused';
+  static const folded = 'folded';
   static const listHidden = 'list_hidden';
 }

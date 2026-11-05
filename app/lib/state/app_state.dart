@@ -80,8 +80,14 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
   String? pushProblem;
   bool showEnded = false;
 
-  /// The agent list by machine, or everything by last activity.
-  bool recentView = false;
+  /// Agents the user put in focus: shown in their own section at the top of
+  /// the list. It means nothing to the roster itself - it is how this device
+  /// is looking at the list today - so it is kept here and nowhere else.
+  Set<String> focused = {};
+
+  /// Cards the user folded shut, by key. Folds are the user's place in the
+  /// list, so they outlive a reorder and the app being closed.
+  Set<String> folded = {};
 
   /// On web: the hub now serves a newer build of this app than the one running.
   bool updateReady = false;
@@ -168,10 +174,18 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     _conversations.clear();
   }
 
-  Future<void> setRecentView(bool on) async {
-    recentView = on;
+  Future<void> toggleFocus(String id) async {
+    focused = {...focused};
+    if (!focused.remove(id)) focused.add(id);
     notifyListeners();
-    await store.write(Keys.listView, on ? 'recent' : 'machines');
+    await store.write(Keys.focused, focused.join('\n'));
+  }
+
+  Future<void> toggleFold(String key) async {
+    folded = {...folded};
+    if (!folded.remove(key)) folded.add(key);
+    notifyListeners();
+    await store.write(Keys.folded, folded.join('\n'));
   }
 
   /// On a wide window: the agent list folded away, the open agent full width.
@@ -200,7 +214,8 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     final token = await store.read(Keys.token);
     deviceId = await store.read(Keys.deviceId);
     notifications = (await store.read(Keys.notifications)) != 'off';
-    recentView = (await store.read(Keys.listView)) == 'recent';
+    focused = _lines(await store.read(Keys.focused));
+    folded = _lines(await store.read(Keys.folded));
     listHidden = (await store.read(Keys.listHidden)) == 'yes';
     final theme = await store.read(Keys.theme);
     themeMode.value = ThemeMode.values.where((m) => m.name == theme).firstOrNull ?? ThemeMode.system;
@@ -405,3 +420,7 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
     super.dispose();
   }
 }
+
+/// A set written one entry per line; an empty or missing value is no entries.
+Set<String> _lines(String? raw) =>
+    (raw ?? '').split('\n').map((s) => s.trim()).where((s) => s.isNotEmpty).toSet();

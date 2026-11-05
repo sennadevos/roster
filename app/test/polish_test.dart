@@ -490,7 +490,50 @@ void main() {
     await tester.pump();
   });
 
-  testWidgets('agents named print-lab/... sit in a print-lab folder, print-lab itself first and marked main', (tester) async {
+  testWidgets('a fold outlives a reorder, and focus pins an agent to the top', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final hub = FakeHub({});
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    List<Map<String, dynamic>> rows(String labAt) => [
+          row('print-lab', 'srv', 'idle', extra: {'status_at': labAt}),
+          row('print-lab/fans', 'srv', 'idle', extra: {'status_at': labAt}),
+          row('infra', 'srv', 'idle', extra: {'status_at': '2026-10-20T11:00:00+0200'}),
+        ];
+    hub.sendAgents({'agents': rows('2026-10-20T10:00:00+0200'), 'machines': machines});
+    await tester.pumpAndSettle();
+    List<String> names() => tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name).toList();
+    expect(names(), ['infra', 'print-lab', 'print-lab/fans']);
+
+    await tester.tap(find.byIcon(Icons.expand_more));
+    await tester.pumpAndSettle();
+    expect(names(), ['infra', 'print-lab']);
+    expect(store.values[Keys.folded], 'srv/print-lab');
+
+    // print-lab stirs and moves to the top; it must not spring open again.
+    hub.sendAgents({'agents': rows('2026-10-20T12:00:00+0200'), 'machines': machines});
+    await tester.pumpAndSettle();
+    expect(names(), ['print-lab', 'infra']);
+
+    // In focus: a section of its own above the rest, and it is still in the list.
+    await state.toggleFocus('infra@srv');
+    await tester.pumpAndSettle();
+    expect(find.text('In focus'), findsOneWidget);
+    // Twice over: once in the focus section, once where it lives in the list.
+    expect(names(), ['infra', 'print-lab', 'infra']);
+    expect(store.values[Keys.focused], 'infra@srv');
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
+
+  testWidgets('an agent with agents under it is one card that unfolds, and folds shut again', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1280, 800);
     addTearDown(tester.view.reset);
@@ -512,19 +555,19 @@ void main() {
     await tester.pump();
     await tester.pumpAndSettle();
 
-    // One folder, the lone agent without one.
-    expect(find.byIcon(Icons.folder_open_outlined), findsOneWidget);
+    // One card with agents under it, and the lone agent that has none. Cards
+    // start open, and the one with nothing under it carries no unfold.
     final tiles = tester.widgetList<AgentTile>(find.byType(AgentTile)).toList();
-    final inFolder = tiles.where((t) => t.agent.name.startsWith('print-lab')).toList();
-    expect(inFolder.map((t) => t.agent.name), ['print-lab', 'print-lab/fans', 'print-lab/scraper']);
-    expect(inFolder.first.main, isTrue);
-    expect(inFolder.skip(1).every((t) => !t.main), isTrue);
-    expect(find.text('main'), findsOneWidget);
+    final under = tiles.where((t) => t.agent.name.startsWith('print-lab')).toList();
+    expect(under.map((t) => t.agent.name), ['print-lab', 'print-lab/fans', 'print-lab/scraper']);
+    expect(under.first.onFold, isNotNull);
+    expect(under.skip(1).every((t) => t.onFold == null), isTrue);
+    expect(tiles.firstWhere((t) => t.agent.name == 'infra').onFold, isNull);
 
-    // Folded shut: its agents go, the others stay.
-    await tester.tap(find.byIcon(Icons.folder_open_outlined));
+    // Folded shut: the agents under it go, the others stay.
+    await tester.tap(find.byIcon(Icons.expand_more));
     await tester.pumpAndSettle();
-    expect(tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name), ['infra']);
+    expect(tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name), ['infra', 'print-lab']);
 
     state.dispose();
     await hub.events.close();

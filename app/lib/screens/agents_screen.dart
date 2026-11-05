@@ -82,7 +82,7 @@ class _AgentsScreenState extends State<AgentsScreen> {
     });
   }
 
-  List<Agent> _order(AppState app) => _ListModel(app, _search.text, recent: app.recentView).order;
+  List<Agent> _order(AppState app) => _ListModel(app, _search.text, folded: app.folded).order;
 
   bool get _typing {
     final ctx = FocusManager.instance.primaryFocus?.context;
@@ -236,8 +236,30 @@ class _AgentsScreenState extends State<AgentsScreen> {
 /// What the list shows, in order: the agents that need the user, then each
 /// machine with the rest of its agents (or, in the recent view, every other
 /// agent by last activity), all narrowed by the search.
+/// One card in the list: an agent, and the agents named under it.
+///
+/// `roster/app` sits inside `roster`; if `roster/app/frontend` turns up, the
+/// `roster/app` card grows an unfold of its own. A card with nothing under it
+/// does not unfold, because there would be nothing to see.
+class _Node {
+  _Node(this.machine, this.prefix);
+
+  final String machine;
+  final String prefix;
+  Agent? agent;
+  final List<_Node> kids = [];
+
+  /// What a fold is remembered by. The name alone is not enough: two machines
+  /// can both have an `app`.
+  String get key => '$machine/$prefix';
+
+  /// The last activity anywhere in this card, which is what sorts it: a card
+  /// rises when anything under it stirs.
+  DateTime recency = DateTime.fromMillisecondsSinceEpoch(0);
+}
+
 class _ListModel {
-  _ListModel(AppState app, String query, {this.recent = false}) {
+  _ListModel(AppState app, String query, {Set<String> folded = const {}}) {
     final q = query.trim().toLowerCase();
     searching = q.isNotEmpty;
     bool match(Agent a) =>
@@ -245,121 +267,108 @@ class _ListModel {
         a.name.toLowerCase().contains(q) ||
         (a.role ?? '').toLowerCase().contains(q) ||
         a.machine.toLowerCase().contains(q);
-    needs = searching ? [] : app.snapshot.agents.where((a) => a.needsYou && a.stale == null).toList();
+    // Focus is a second look at an agent, not a place it moves to: a card
+    // with agents under it would leave them orphaned if it left the list.
+    focus = [for (final a in app.snapshot.agents) if (app.focused.contains(a.id) && match(a)) a]
+      ..sort((a, b) => a.name.compareTo(b.name));
+    needs = searching ? [] : [for (final a in app.snapshot.agents) if (a.needsYou && a.stale == null) a];
     final pinned = needs.map((a) => a.id).toSet();
-    parked = [for (final a in app.snapshot.agents) if (a.parked && match(a)) a]..sort((a, b) => a.name.compareTo(b.name));
+    parked = [for (final a in app.snapshot.agents) if (a.parked && match(a) && !pinned.contains(a.id)) a]
+      ..sort((a, b) => a.name.compareTo(b.name));
     pinned.addAll(parked.map((a) => a.id));
-    groups = [
-      for (final (m, agents) in app.snapshot.grouped())
-        if (!searching || agents.any(match)) (m, agents.where((a) => match(a) && !pinned.contains(a.id)).toList()),
-    ];
-    final epoch = DateTime.fromMillisecondsSinceEpoch(0);
-    recentAgents = [for (final g in groups) ...g.$2]
-      ..sort((a, b) => (b.statusAt ?? epoch).compareTo(a.statusAt ?? epoch));
-    order = recent ? [...needs, ...recentAgents] : [...needs, for (final g in groups) ...g.$2];
+    roots = _tree([for (final a in app.snapshot.agents) if (match(a) && !pinned.contains(a.id)) a]);
+    // What j/k walks: each agent once, in the order the list shows it. The
+    // focus section is the same agents again, so it is not walked twice.
+    final seen = <String>{};
+    order = [for (final a in [...needs, ..._walk(roots, folded)]) if (seen.add(a.id)) a];
   }
 
-  final bool recent;
-  late final List<Agent> parked;
-  late final List<Agent> recentAgents;
   late final bool searching;
+  late final List<Agent> focus;
   late final List<Agent> needs;
-  late final List<(Machine, List<Agent>)> groups;
+  late final List<Agent> parked;
+  late final List<_Node> roots;
+
+  /// Every row the keyboard can reach, in the order they are on screen.
   late final List<Agent> order;
 }
 
-/// Folders the user folded shut, by place and name ("srv/print-lab"); for as
-/// long as the app runs.
-final _foldedShut = ValueNotifier<Set<String>>({});
-
-/// Agents with folders: every `x/...` agent sits in a folder `x`, and an
-/// agent named `x` itself goes first in it, marked main. Agents without a `/`
-/// that nothing sits under stay as they are. With [recent], a folder takes
-/// the place of its most recently active agent.
-List<Widget> _foldered(List<Agent> agents, String scope, Widget Function(Agent a, {int? level, bool main}) tile,
-    {bool recent = false}) {
-  final byTop = <String, List<Agent>>{};
+/// The agents arranged by their names, most recently active card first.
+List<_Node> _tree(List<Agent> agents) {
+  final nodes = <String, _Node>{};
+  final roots = <_Node>[];
   for (final a in agents) {
-    byTop.putIfAbsent(a.name.split('/').first, () => []).add(a);
+    final parts = a.name.split('/');
+    _Node? parent;
+    for (var i = 0; i < parts.length; i++) {
+      final prefix = parts.take(i + 1).join('/');
+      final node = nodes.putIfAbsent('${a.machine}/$prefix', () {
+        final n = _Node(a.machine, prefix);
+        (parent?.kids ?? roots).add(n);
+        return n;
+      });
+      if (i == parts.length - 1) node.agent = a;
+      parent = node;
+    }
   }
-  final epoch = DateTime.fromMillisecondsSinceEpoch(0);
-  DateTime latest(List<Agent> l) => l.map((a) => a.statusAt ?? epoch).reduce((x, y) => x.isAfter(y) ? x : y);
-  final tops = byTop.keys.toList();
-  if (recent) tops.sort((x, y) => latest(byTop[y]!).compareTo(latest(byTop[x]!)));
-  final out = <Widget>[];
-  for (final top in tops) {
-    final members = byTop[top]!;
-    if (!members.any((a) => a.name.contains('/'))) {
-      out.addAll(members.map((a) => tile(a)));
-      continue;
+  void settle(_Node n) {
+    for (final k in n.kids) {
+      settle(k);
+      if (k.recency.isAfter(n.recency)) n.recency = k.recency;
     }
-    final key = '$scope/$top';
-    final shut = _foldedShut.value.contains(key);
-    final rest = members.where((a) => a.name != top).toList()
-      ..sort(recent
-          ? (x, y) => (y.statusAt ?? epoch).compareTo(x.statusAt ?? epoch)
-          : (x, y) => x.name.compareTo(y.name));
-    out.add(_FolderHeader(
-      name: top,
-      count: members.length,
-      shut: shut,
-      busy: members.any((a) => a.status == 'working'),
-      onTap: () {
-        final next = {..._foldedShut.value};
-        if (!next.remove(key)) next.add(key);
-        _foldedShut.value = next;
-      },
-    ));
-    if (!shut) {
-      out.addAll([
-        for (final a in members.where((a) => a.name == top)) tile(a, level: 1, main: true),
-        for (final a in rest) tile(a, level: a.depth),
-      ]);
+    final own = n.agent?.statusAt;
+    if (own != null && own.isAfter(n.recency)) n.recency = own;
+  }
+  for (final r in roots) {
+    settle(r);
+  }
+  void sort(List<_Node> l) {
+    l.sort((x, y) {
+      final by = y.recency.compareTo(x.recency);
+      return by != 0 ? by : x.prefix.compareTo(y.prefix);
+    });
+    for (final n in l) {
+      sort(n.kids);
     }
+  }
+  sort(roots);
+  return roots;
+}
+
+/// The rows of [nodes] that are on screen: a folded card hides what is under it.
+List<Agent> _walk(List<_Node> nodes, Set<String> folded) {
+  final out = <Agent>[];
+  for (final n in nodes) {
+    final a = n.agent;
+    if (a != null) out.add(a);
+    // A node with no agent of its own is only a name on the way down, so what
+    // is under it is shown whatever the fold says.
+    if (a == null || !folded.contains(n.key)) out.addAll(_walk(n.kids, folded));
   }
   return out;
 }
 
-/// A folder of agents named `name/...`; a tap folds it shut or open.
-class _FolderHeader extends StatelessWidget {
-  const _FolderHeader(
-      {required this.name, required this.count, required this.shut, required this.busy, required this.onTap});
-
-  final String name;
-  final int count;
-  final bool shut;
-  final bool busy;
-  final VoidCallback onTap;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-    return Padding(
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 8, 12, 8),
-          child: Row(children: [
-            Icon(shut ? Icons.folder_outlined : Icons.folder_open_outlined, size: 18, color: cs.onSurfaceVariant),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Text(name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.titleSmall?.copyWith(fontWeight: FontWeight.w700, color: cs.onSurface)),
-            ),
-            if (busy && shut) ...[const RunningSpinner(size: 11), const SizedBox(width: 8)],
-            Text('$count', style: theme.textTheme.labelMedium?.copyWith(color: cs.outline)),
-            const SizedBox(width: 4),
-            Icon(shut ? Icons.expand_more : Icons.expand_less, size: 18, color: cs.outline),
-          ]),
-        ),
-      ),
-    );
+/// The cards of [nodes], each with the ones under it when it is unfolded.
+List<Widget> _cards(
+  List<_Node> nodes,
+  Set<String> folded,
+  void Function(String key) onFold,
+  Widget Function(Agent a, {int level, bool open, VoidCallback? onFold}) tile, {
+  int level = 0,
+}) {
+  final out = <Widget>[];
+  for (final n in nodes) {
+    final a = n.agent;
+    final shut = folded.contains(n.key);
+    if (a == null) {
+      out.addAll(_cards(n.kids, folded, onFold, tile, level: level));
+      continue;
+    }
+    out.add(tile(a,
+        level: level, open: n.kids.isEmpty ? false : !shut, onFold: n.kids.isEmpty ? null : () => onFold(n.key)));
+    if (!shut) out.addAll(_cards(n.kids, folded, onFold, tile, level: level + 1));
   }
+  return out;
 }
 
 class _AgentList extends StatelessWidget {
@@ -393,7 +402,7 @@ class _AgentList extends StatelessWidget {
     final app = AppScope.of(context);
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
-    final model = _ListModel(app, search.text, recent: app.recentView);
+    final model = _ListModel(app, search.text, folded: app.folded);
     final live = app.snapshot.agents.where((a) => !a.ended).length;
     final working = app.snapshot.agents.where((a) => a.status == 'working').length;
 
@@ -427,21 +436,59 @@ class _AgentList extends StatelessWidget {
         onAction: search.clear,
       );
     } else {
-      Widget tile(Agent a, {bool showMachine = false, bool indent = true, int? level, bool main = false}) => AgentTile(
+      // `keyed` is off for the focus section: an agent shown there is also in
+      // the list below, and one GlobalKey cannot be in two places.
+      Widget tile(Agent a,
+              {bool showMachine = true,
+              bool indent = true,
+              int level = 0,
+              bool open = false,
+              VoidCallback? onFold,
+              bool keyed = true}) =>
+          AgentTile(
             a,
-            key: rowKey(a.id),
+            key: keyed ? rowKey(a.id) : null,
             selected: a.id == selected,
             cursor: a.id == cursor,
             showMachine: showMachine,
             indent: indent && !model.searching,
             level: level,
-            main: main,
+            open: open,
+            onFold: onFold,
+            focused: app.focused.contains(a.id),
           );
-      body = ValueListenableBuilder(
-        valueListenable: _foldedShut,
-        builder: (context, _, _) => ListView(
+      final unreachable = app.snapshot.machines.where((m) => !m.reachable).toList();
+      body = ListView(
         padding: EdgeInsets.only(bottom: wide ? 24 : 96, top: 4),
         children: [
+          // The list no longer has a heading per machine, so a machine that
+          // cannot be reached says so here: its agents are last known state,
+          // and one with no agents at all would otherwise just be missing.
+          for (final m in unreachable)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 2),
+              child: Row(children: [
+                Icon(Icons.cloud_off_outlined, size: 15, color: cs.outline),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    '${m.name} · Unreachable${m.error == null ? '' : ': ${m.error}'} · last known state',
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: theme.textTheme.bodySmall?.copyWith(color: cs.outline),
+                  ),
+                ),
+              ]),
+            ),
+          if (model.focus.isNotEmpty) ...[
+            _SectionHeader(
+              icon: Icons.push_pin_rounded,
+              color: cs.primary,
+              title: 'In focus',
+              count: model.focus.length,
+            ),
+            for (final a in model.focus) tile(a, indent: false, keyed: false),
+          ],
           if (model.needs.isNotEmpty) ...[
             _SectionHeader(
               icon: Icons.priority_high_rounded,
@@ -449,33 +496,16 @@ class _AgentList extends StatelessWidget {
               title: 'Needs you',
               count: model.needs.length,
             ),
-            for (final a in model.needs) tile(a, showMachine: true, indent: false),
+            for (final a in model.needs) tile(a, indent: false),
           ],
-          if (model.recent) ...[
-            if (model.needs.isNotEmpty)
-              _SectionHeader(
-                icon: Icons.history,
-                color: cs.outline,
-                title: 'By last activity',
-                count: model.recentAgents.length,
-              ),
-            ..._foldered(model.recentAgents, 'recent',
-                (Agent a, {int? level, bool main = false}) => tile(a, showMachine: true, level: level ?? 0, main: main),
-                recent: true),
-          ] else
-          for (final (machine, agents) in model.groups) ...[
-            _MachineHeader(machine, count: agents.length),
-            if (agents.isEmpty && machine.reachable)
-              Padding(
-                padding: const EdgeInsets.fromLTRB(46, 0, 16, 8),
-                child: Text(
-                  app.snapshot.agents.any((a) => a.machine == machine.name) ? 'Only agents that need you' : 'No agents',
-                  style: theme.textTheme.bodySmall?.copyWith(color: cs.outline),
-                ),
-              ),
-            ..._foldered(agents, machine.name,
-                (Agent a, {int? level, bool main = false}) => tile(a, level: level, main: main)),
-          ],
+          if (model.focus.isNotEmpty || model.needs.isNotEmpty)
+            _SectionHeader(
+              icon: Icons.history,
+              color: cs.outline,
+              title: 'By last activity',
+              count: model.order.length - model.needs.length,
+            ),
+          ..._cards(model.roots, app.folded, app.toggleFold, tile),
           if (model.parked.isNotEmpty)
             Theme(
               data: theme.copyWith(dividerColor: Colors.transparent),
@@ -487,12 +517,10 @@ class _AgentList extends StatelessWidget {
                     style: theme.textTheme.labelLarge?.copyWith(color: cs.outline)),
                 subtitle: Text('No process running; you can read them, and sending one a message resumes it.',
                     style: theme.textTheme.bodySmall?.copyWith(color: cs.outline)),
-                children: _foldered(model.parked, 'parked',
-                    (Agent a, {int? level, bool main = false}) => tile(a, showMachine: true, level: level ?? 0, main: main)),
+                children: [for (final a in model.parked) tile(a, indent: false)],
               ),
             ),
         ],
-        ),
       );
     }
 
@@ -562,26 +590,10 @@ class _AgentList extends StatelessWidget {
           const SizedBox(width: 4),
         ],
         bottom: PreferredSize(
-          preferredSize: const Size.fromHeight(96),
+          preferredSize: const Size.fromHeight(52),
           child: Padding(
             padding: const EdgeInsets.fromLTRB(12, 0, 12, 8),
-            child: Column(children: [
-              _SearchField(controller: search, focus: searchFocus, onSubmitted: onSearchSubmitted),
-              const SizedBox(height: 8),
-              SizedBox(
-                width: double.infinity,
-                child: SegmentedButton<bool>(
-                  showSelectedIcon: false,
-                  style: const ButtonStyle(visualDensity: VisualDensity.compact),
-                  segments: const [
-                    ButtonSegment(value: false, icon: Icon(Icons.dns_outlined, size: 16), label: Text('By machine')),
-                    ButtonSegment(value: true, icon: Icon(Icons.history, size: 16), label: Text('Recent')),
-                  ],
-                  selected: {app.recentView},
-                  onSelectionChanged: (s) => app.setRecentView(s.first),
-                ),
-              ),
-            ]),
+            child: _SearchField(controller: search, focus: searchFocus, onSubmitted: onSearchSubmitted),
           ),
         ),
       ),
@@ -767,62 +779,6 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _MachineHeader extends StatelessWidget {
-  const _MachineHeader(this.machine, {required this.count});
-
-  final Machine machine;
-  final int count;
-
-  @override
-  Widget build(BuildContext context) {
-    final theme = Theme.of(context);
-    final cs = theme.colorScheme;
-    final muted = cs.outline;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(20, 14, 20, 4),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          Row(
-            children: [
-              Icon(machine.reachable ? Icons.dns_outlined : Icons.cloud_off_outlined, size: 16, color: muted),
-              const SizedBox(width: 8),
-              Expanded(
-                child: Row(children: [
-                  Flexible(
-                    child: Text(
-                      machine.name,
-                      overflow: TextOverflow.ellipsis,
-                      style: theme.textTheme.labelLarge?.copyWith(
-                        color: machine.reachable ? cs.onSurfaceVariant : muted,
-                        fontWeight: FontWeight.w700,
-                      ),
-                    ),
-                  ),
-                  if (machine.local) ...[const SizedBox(width: 8), const Tag('hub')],
-                ]),
-              ),
-              if (count > 0) Text('$count', style: theme.textTheme.labelMedium?.copyWith(color: muted)),
-            ],
-          ),
-          if (!machine.reachable)
-            Padding(
-              padding: const EdgeInsets.only(left: 24, top: 2),
-              child: Text(
-                'Unreachable${machine.error == null ? '' : ': ${machine.error}'} · last known state',
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: theme.textTheme.bodySmall?.copyWith(color: muted),
-              ),
-            ),
-        ],
-      ),
-    );
-  }
-}
-
-/// One agent: its status, name (the leads above it dimmed), role, how long
-/// in this status, unread mail, an API error, and its subagents.
 class AgentTile extends StatelessWidget {
   const AgentTile(this.agent,
       {super.key,
@@ -831,7 +787,9 @@ class AgentTile extends StatelessWidget {
       this.showMachine = false,
       this.indent = true,
       this.level,
-      this.main = false});
+      this.open = false,
+      this.onFold,
+      this.focused = false});
 
   final Agent agent;
   final bool selected;
@@ -842,8 +800,14 @@ class AgentTile extends StatelessWidget {
   /// How far in it sits, when not by its own depth (inside a folder).
   final int? level;
 
-  /// The agent whose name is its folder's: shown first, marked main.
-  final bool main;
+  /// Whether the agents named under this one are showing. [onFold] is null
+  /// when there are none, and then the card carries no unfold at all.
+  final bool open;
+  final VoidCallback? onFold;
+
+  /// In the user's focus section: marked, so the row in the list below reads
+  /// as the same agent seen twice rather than two agents.
+  final bool focused;
 
   @override
   Widget build(BuildContext context) {
@@ -894,6 +858,23 @@ class AgentTile extends StatelessWidget {
                 child: Row(
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
+                    if (onFold != null)
+                      // Excluded from the semantics tree on purpose: it sits
+                      // inside the row's own button, and a button within a
+                      // button splits the row's label into pieces.
+                      ExcludeSemantics(
+                        child: InkResponse(
+                          onTap: onFold,
+                          radius: 18,
+                          child: Padding(
+                            padding: const EdgeInsets.only(right: 4),
+                            child: Icon(open ? Icons.expand_more : Icons.chevron_right,
+                                size: 18, color: cs.onSurfaceVariant),
+                          ),
+                        ),
+                      )
+                    else if (indent)
+                      const SizedBox(width: 22),
                     Padding(padding: const EdgeInsets.only(top: 1), child: StatusDot(a.status, size: 10.5)),
                     const SizedBox(width: 10),
                     Expanded(
@@ -922,7 +903,10 @@ class AgentTile extends StatelessWidget {
                                   overflow: TextOverflow.ellipsis,
                                 ),
                               ),
-                              if (main) ...[const SizedBox(width: 6), Tag('main', color: cs.primary)],
+                              if (focused) ...[
+                                const SizedBox(width: 6),
+                                Icon(Icons.push_pin_rounded, size: 13, color: cs.primary),
+                              ],
                               if (a.temp) ...[const SizedBox(width: 6), const Tag('quick')],
                               const SizedBox(width: 8),
                               if (a.unread > 0) ...[UnreadPill(a.unread), const SizedBox(width: 8)],
@@ -1005,6 +989,22 @@ class AgentTile extends StatelessWidget {
                                 ),
                               ]),
                             ),
+                          if (a.stale != null)
+                            Padding(
+                              padding: const EdgeInsets.only(top: 3),
+                              child: Row(children: [
+                                Icon(Icons.cloud_off_outlined, size: 14, color: muted),
+                                const SizedBox(width: 4),
+                                Expanded(
+                                  child: Text(
+                                    'Unreachable: ${a.stale} · last known state',
+                                    maxLines: 1,
+                                    overflow: TextOverflow.ellipsis,
+                                    style: theme.textTheme.bodySmall?.copyWith(color: muted),
+                                  ),
+                                ),
+                              ]),
+                            ),
                           if (subs.isNotEmpty)
                             Padding(
                               padding: const EdgeInsets.only(top: 4),
@@ -1044,10 +1044,12 @@ class AgentTile extends StatelessWidget {
 Future<void> showAgentMenu(BuildContext context, Agent a, Offset at) async {
   final overlay = Overlay.of(context).context.findRenderObject() as RenderBox;
   final live = !a.ended && !a.parked;
+  final inFocus = AppScope.read(context).focused.contains(a.id);
   final action = await showMenu<String>(
     context: context,
     position: RelativeRect.fromRect(Rect.fromPoints(at, at), Offset.zero & overlay.size),
     items: [
+      PopupMenuItem(value: 'focus', child: Text(inFocus ? 'Out of focus' : 'Put in focus')),
       if (live) const PopupMenuItem(value: 'park', child: Text('Park')),
       if (a.parked) const PopupMenuItem(value: 'resume', child: Text('Start')),
       if (a.status == 'gone') const PopupMenuItem(value: 'resume', child: Text('Resume')),
@@ -1055,6 +1057,10 @@ Future<void> showAgentMenu(BuildContext context, Agent a, Offset at) async {
     ],
   );
   if (action == null || !context.mounted) return;
+  if (action == 'focus') {
+    await AppScope.read(context).toggleFocus(a.id);
+    return;
+  }
   final client = AppScope.read(context).client;
   if (client == null) return;
   try {

@@ -121,7 +121,7 @@ void main() {
     await tester.pump();
 
     expect(find.text('Nothing needs you right now'), findsOneWidget);
-    await tester.tap(find.text('infra'));
+    await tester.tap(find.byType(AgentTile));
     await tester.pumpAndSettle();
     // Both at once: the row in the list and the conversation with its composer.
     expect(find.text('Roster'), findsOneWidget);
