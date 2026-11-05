@@ -130,6 +130,12 @@ function transcriptFor(agent) {
     }
     push({ role: 'assistant', text: r % 3 === 0 ? longReply : `Updated \`status.dart\`: each status now has a colour that reads in both themes, and *working* pulses gently.\n\nNext I'll wire the search field to \`/\`.` });
   }
+  // a drawing: an agent asked for a picture answers with an svg fence
+  push({ role: 'user', text: 'Draw me the fan plate: 23 fans in a grid, with the notch bottom left.' });
+  push({ role: 'assistant', text: 'Here is the layout as it stands:\n\n```svg\n<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 240 120"><rect x="2" y="2" width="236" height="116" rx="6" fill="#f6f6f4" stroke="#333"/>' +
+    Array.from({ length: 23 }, (_, i) => { const x = 14 + (i % 8) * 28, y = 18 + Math.floor(i / 8) * 30; return `<circle cx="${x}" cy="${y}" r="11" fill="#dde6f2" stroke="#45607f"/>`; }).join('') +
+    '<rect x="6" y="96" width="20" height="18" fill="#fff" stroke="#333"/><text x="120" y="112" font-size="9" text-anchor="middle" fill="#555">23 fans, notch bottom left</text></svg>\n```\n\nThe notch is the 15 x 20 mm cut-out.' });
+
   // mail from another agent: delivered as a user turn, shown as a mail line
   push({ role: 'user', text: `[roster] You have mail from print-lab/workbench-software.` });
   push({ role: 'assistant', text: 'Noted: the workbench build is on the pi now.' });

@@ -9,6 +9,7 @@ import '../models/transcript.dart';
 import '../platform/platform.dart';
 import '../theme.dart';
 import 'status.dart';
+import 'svg_block.dart';
 
 /// How wide the conversation column gets on a wide window, so lines stay
 /// readable; it sits in the middle of the pane, with the dialog card and
@@ -251,7 +252,7 @@ class AssistantBlock extends StatelessWidget {
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 760),
           child: MarkdownBody(
-            data: text,
+            data: fenceBareSvg(text),
             selectable: true,
             onSelectionChanged: (t, sel, _) => _selected(t, sel),
             styleSheet: markdownStyle(context),
@@ -265,6 +266,26 @@ class AssistantBlock extends StatelessWidget {
       ),
     );
   }
+}
+
+/// An `<svg>` written straight into the text, with no fence around it, put in
+/// one. Markdown drops raw HTML, so without this the drawing would simply not
+/// be there - and an agent that writes `<svg ...>` plainly means the picture.
+String fenceBareSvg(String text) {
+  if (!text.contains('<svg')) return text;
+  final fenced = RegExp(r'```[\s\S]*?```');
+  final spans = [for (final m in fenced.allMatches(text)) (m.start, m.end)];
+  bool inFence(int i) => spans.any((s) => i >= s.$1 && i < s.$2);
+  final out = StringBuffer();
+  var at = 0;
+  for (final m in RegExp(r'<svg[\s\S]*?</svg>', caseSensitive: false).allMatches(text)) {
+    if (inFence(m.start)) continue;
+    out.write(text.substring(at, m.start));
+    out.write('\n```svg\n${m.group(0)}\n```\n');
+    at = m.end;
+  }
+  out.write(text.substring(at));
+  return out.toString();
 }
 
 MarkdownStyleSheet markdownStyle(BuildContext context) {
@@ -326,6 +347,9 @@ class CodeBlockBuilder extends MarkdownElementBuilder {
       final cls = first.attributes['class'];
       if (cls != null && cls.startsWith('language-')) lang = cls.substring('language-'.length);
     }
+    // A drawing is shown, not printed: an agent asked for a picture writes an
+    // svg fence, and that is what he wants to see.
+    if (SvgBlock.isSvg(lang, code)) return SvgBlock(code);
     return CodeBlock(code: code, language: lang);
   }
 }
