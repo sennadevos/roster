@@ -11,11 +11,10 @@ void main() {
     ];
     Map<String, dynamic>? said;
     final hub = FakeHub({
-      'GET /v1/chats': (_, _) => {
-            'chats': [
-              {'id': 7, 'title': 'notecarrier', 'model': 'moonshotai/kimi-k3.1-pro', 'params': '{"effort":"medium"}'},
-            ]
-          },
+      // The hub hands the `chats` CLI's own JSON through, and that is a list.
+      'GET /v1/chats': (_, _) => [
+            {'id': 7, 'title': 'notecarrier', 'model': 'moonshotai/kimi-k3.1-pro', 'params': '{"effort":"medium"}'},
+          ],
       'GET /v1/chats/7': (_, _) => {
             'id': 7,
             'title': 'notecarrier',
@@ -32,13 +31,11 @@ void main() {
         ];
         return {'id': 7, 'text': 'a carrier board for a Notecard.', 'cost': 0.0032};
       },
-      'GET /v1/models': (_, _) => {
-            'models': [
-              {'id': 'claude:sonnet', 'name': 'Claude Sonnet (your login)', 'context_length': 1000000},
-              {'id': 'moonshotai/kimi-k3.1-pro', 'name': 'Kimi K3.1 Pro', 'context_length': 1048576,
-                'price_in': 2.0, 'price_out': 10.0, 'supported': ['reasoning', 'temperature']},
-            ]
-          },
+      'GET /v1/models': (_, _) => [
+            {'id': 'claude:sonnet', 'name': 'Claude Sonnet (your login)', 'context_length': 1000000},
+            {'id': 'moonshotai/kimi-k3.1-pro', 'name': 'Kimi K3.1 Pro', 'context_length': 1048576,
+              'price_in': 2.0, 'price_out': 10.0, 'supported': ['reasoning', 'temperature']},
+          ],
     });
     final client = hub.client(Uri.parse('https://hub'), 'tok-1');
 

@@ -71,6 +71,15 @@ class HubClient {
   /// [timeout] for requests the hub itself gives longer (new, resume).
   Future<Map<String, dynamic>> _send(String method, String path,
       {Map<String, String>? query, Object? body, Duration timeout = _timeout}) async {
+    final json = await _any(method, path, query: query, body: body, timeout: timeout);
+    if (json is! Map<String, dynamic>) throw const HubException(0, 'the hub sent something that is not JSON');
+    return json;
+  }
+
+  /// The same, for the endpoints that answer with a list: the chat ones hand
+  /// the `chats` CLI's own JSON straight through, and that is an array.
+  Future<Object?> _any(String method, String path,
+      {Map<String, String>? query, Object? body, Duration timeout = _timeout}) async {
     final req = http.Request(method, _uri(path, query))..headers.addAll(_headers);
     if (body != null) {
       req.headers['Content-Type'] = 'application/json';
@@ -94,10 +103,17 @@ class HubClient {
       final msg = json is Map && json['error'] != null ? '${json['error']}' : 'HTTP ${res.statusCode}';
       throw HubException(res.statusCode, msg);
     }
-    if (json is! Map<String, dynamic>) {
-      throw HubException(res.statusCode, 'the hub sent something that is not JSON');
-    }
     return json;
+  }
+
+  /// The rows of a list answer, whether it came as the array itself or
+  /// wrapped under [key].
+  static List<Map<String, dynamic>> _rows(Object? json, String key) {
+    final list = json is List ? json : (json is Map ? json[key] : null);
+    return [
+      for (final e in (list as List? ?? const []))
+        if (e is Map<String, dynamic>) e,
+    ];
   }
 
   Future<Map<String, dynamic>> version() => _send('GET', '/v1/version');
@@ -182,13 +198,8 @@ class HubClient {
   // model every turn. An answer can take a while, so these allow more time
   // than anything else here - the hub itself waits up to 240 s for a say.
 
-  Future<List<Chat>> chats() async {
-    final json = await _send('GET', '/v1/chats');
-    return [
-      for (final c in (json['chats'] as List? ?? const []))
-        if (c is Map<String, dynamic>) Chat.fromJson(c),
-    ];
-  }
+  Future<List<Chat>> chats() async =>
+      [for (final c in _rows(await _any('GET', '/v1/chats'), 'chats')) Chat.fromJson(c)];
 
   Future<ChatPage> chat(int id) async => ChatPage.fromJson(await _send('GET', '/v1/chats/$id'));
 
@@ -239,13 +250,8 @@ class HubClient {
     return json['text'] as String? ?? '';
   }
 
-  Future<List<ModelInfo>> models() async {
-    final json = await _send('GET', '/v1/models', query: null);
-    return [
-      for (final m in (json['models'] as List? ?? const []))
-        if (m is Map<String, dynamic>) ModelInfo.fromJson(m),
-    ];
-  }
+  Future<List<ModelInfo>> models() async =>
+      [for (final m in _rows(await _any('GET', '/v1/models'), 'models')) ModelInfo.fromJson(m)];
 
   Future<void> resume(String agent) =>
       _send('POST', '/v1/resume', body: {'agent': agent}, timeout: const Duration(seconds: 100));
