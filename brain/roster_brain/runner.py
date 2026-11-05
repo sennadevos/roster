@@ -27,6 +27,7 @@ import json
 import os
 import re
 import signal
+import socket
 import sys
 import tempfile
 import termios
@@ -62,6 +63,17 @@ EFFORTS = ("low", "medium", "high", "xhigh", "max")
 REVIVE_MAX = 5
 MAX_BUFFER = 64 * 1024 * 1024
 SCREEN_LINES = 60
+
+
+def socket_answers(path):
+    """True when something listens on a unix socket path."""
+    with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+        sock.settimeout(2)
+        try:
+            sock.connect(path)
+        except OSError:
+            return False
+    return True
 
 
 def socket_path(session_id):
@@ -380,6 +392,7 @@ class Runner:
         self.interrupting = False
         self.revives = 0
         self.revive_task = None
+        self.sock_ino = None
         self.turn_started = time.monotonic()
         self.started = transcript_exists(session_id)
         self.term = Terminal(self.submit, self.key)
@@ -670,8 +683,10 @@ class Runner:
                     self.started = transcript_exists(self.sid)
         finally:
             server.close()
+            # Only our own: a later runner may have bound the path since.
             try:
-                os.remove(socket_path(self.sid))
+                if os.stat(socket_path(self.sid)).st_ino == self.sock_ino:
+                    os.remove(socket_path(self.sid))
             except OSError:
                 pass
 
@@ -794,12 +809,17 @@ class Runner:
     async def serve_socket(self):
         path = socket_path(self.sid)
         os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
+        # Another runner of this session still answers there: removing its
+        # socket would cut it off from roster while it runs on, so step aside.
+        if socket_answers(path):
+            raise SystemExit("roster-brain: %s already runs this session" % self.name)
         try:
             os.remove(path)
         except OSError:
             pass
         server = await asyncio.start_unix_server(self.handle, path=path)
         os.chmod(path, 0o600)
+        self.sock_ino = os.stat(path).st_ino
         return server
 
     async def handle(self, reader, writer):

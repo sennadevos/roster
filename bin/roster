@@ -2474,13 +2474,15 @@ def prompt_is_empty(e):
 
     The input line is the last `❯` line on screen. Claude draws its suggested
     next prompt there too, dimmed (SGR 2); that is not text anyone typed.
-    An SDK agent's runner says itself whether its input holds text.
+    An SDK agent's runner says itself whether its input holds text; one that
+    does not answer is read off its screen like Claude, so it can still be
+    parked and resumed, which is what brings it back.
     """
     if is_sdk(e):
         try:
             return not control(e, "status", timeout=5)["input"]
         except Fail:
-            return False
+            pass
     for line in reversed(screen(e).splitlines()):
         if "❯" in line:
             typed = re.sub(r"\x1b\[2m.*?(\x1b\[0m|$)", "", line)
