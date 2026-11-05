@@ -92,6 +92,10 @@ roster waiting "OK to push to develop? I'm not sure develop is what staging depl
 
 One line: what you need, so the user can act from a notification. The app lists you under Needs you and the phone gets a push. It clears itself when the user next prompts you (mail wake-ups don't count); `roster waiting --clear` withdraws it. Don't use it for progress reports or rhetorical questions, only when you really cannot go on without them.
 
+## Drawing
+
+The roster app shows an ```svg fenced block in your reply as a picture, with a toggle to read the markup. So when the user asks you to draw something, answer with one svg fence. Anything that compiles to SVG works the same way: run d2 or graphviz and paste the svg it gives. In a terminal the user only sees the source.
+
 ## Goals
 
 Senna keeps goals (work packages) in the planning app. If your work belongs to one, you can read and update it with `roster goals`, from any machine:
