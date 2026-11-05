@@ -339,11 +339,13 @@ List<_Node> _tree(List<Agent> agents) {
 /// under it exist. It unfolds like any other card and holds them together.
 class _GroupCard extends StatelessWidget {
   const _GroupCard(
-      {required this.name, required this.level, required this.count, required this.open, required this.onTap});
+      {required this.name, required this.level, required this.members, required this.open, required this.onTap});
 
   final String name;
   final int level;
-  final int count;
+
+  /// Every agent under the name, however deep: what the card stands for.
+  final List<Agent> members;
   final bool open;
   final VoidCallback onTap;
 
@@ -351,25 +353,84 @@ class _GroupCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final sc = statusColors(context);
+    final muted = cs.outline;
+    final live = members.where((a) => !a.ended).toList();
+    final needs = live.where((a) => a.needsYou).length;
+    // The card wears the state of the agents under it: anything that needs
+    // him first, then anything running.
+    final status = needs > 0
+        ? 'blocked'
+        : live.any((a) => a.status == 'working')
+            ? 'working'
+            : live.any((a) => a.status == 'idle')
+                ? 'idle'
+                : 'parked';
+    final unread = members.fold<int>(0, (n, a) => n + a.unread);
+    final at = members.map((a) => a.statusAt).whereType<DateTime>().toList()..sort();
+    final machine = members.map((a) => a.machine).toSet();
+    final nameStyle = theme.textTheme.bodyLarge
+        ?.copyWith(fontWeight: FontWeight.w600, fontSize: 15, color: cs.onSurface, height: 1.3);
+    final slash = name.lastIndexOf('/');
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: onTap,
-        child: Padding(
-          padding: EdgeInsets.fromLTRB(12 + level * 14.0, 9, 12, 9),
-          child: Row(children: [
-            Icon(open ? Icons.expand_more : Icons.chevron_right, size: 18, color: cs.onSurfaceVariant),
-            const SizedBox(width: 4),
-            Expanded(
-              child: Text(name,
-                  maxLines: 1,
-                  overflow: TextOverflow.ellipsis,
-                  style: theme.textTheme.bodyLarge?.copyWith(
-                      fontWeight: FontWeight.w600, fontSize: 15, height: 1.3, color: cs.onSurfaceVariant)),
-            ),
-            Text('$count', style: theme.textTheme.labelMedium?.copyWith(color: cs.outline)),
-          ]),
+      child: Material(
+        color: needs > 0 ? sc.blocked.withValues(alpha: theme.brightness == Brightness.dark ? 0.12 : 0.07) : Colors.transparent,
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+        clipBehavior: Clip.antiAlias,
+        child: InkWell(
+          onTap: onTap,
+          child: Padding(
+            padding: EdgeInsets.fromLTRB(12 + level * 14.0, 9, 12, 9),
+            child: Row(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              Icon(open ? Icons.expand_more : Icons.chevron_right, size: 18, color: cs.onSurfaceVariant),
+              const SizedBox(width: 4),
+              Padding(padding: const EdgeInsets.only(top: 1), child: StatusDot(status, size: 10.5)),
+              const SizedBox(width: 10),
+              Expanded(
+                child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                  Row(children: [
+                    Expanded(
+                      child: Text.rich(
+                        TextSpan(children: [
+                          if (slash >= 0)
+                            TextSpan(
+                              text: name.substring(0, slash + 1),
+                              style: nameStyle?.copyWith(fontWeight: FontWeight.w400, color: muted),
+                            ),
+                          TextSpan(text: name.substring(slash + 1)),
+                          if (machine.length == 1)
+                            TextSpan(text: ' @${machine.first}', style: theme.textTheme.bodySmall?.copyWith(color: muted)),
+                        ]),
+                        style: nameStyle,
+                        maxLines: 1,
+                        overflow: TextOverflow.ellipsis,
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    if (unread > 0 && !open) ...[UnreadPill(unread), const SizedBox(width: 8)],
+                    if (at.isNotEmpty)
+                      Ago(at.last,
+                          style: theme.textTheme.labelSmall
+                              ?.copyWith(color: needs > 0 ? sc.blocked : muted, fontWeight: needs > 0 ? FontWeight.w700 : null)),
+                  ]),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 1),
+                    child: Text(
+                      // Nobody is named this, so the card says what it holds.
+                      [
+                        '${members.length} agent${members.length == 1 ? '' : 's'}',
+                        if (needs > 0) '$needs needs you',
+                      ].join(' · '),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                      style: theme.textTheme.bodySmall?.copyWith(color: needs > 0 ? sc.blocked : cs.onSurfaceVariant),
+                    ),
+                  ),
+                ]),
+              ),
+            ]),
+          ),
         ),
       ),
     );
@@ -405,7 +466,7 @@ List<Widget> _cards(
       out.add(_GroupCard(
         name: n.prefix,
         level: level,
-        count: _walk([n], const {}).length,
+        members: _walk([n], const {}),
         open: !shut,
         onTap: () => onFold(n.key),
       ));

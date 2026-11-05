@@ -507,14 +507,16 @@ void main() {
     await tester.pumpAndSettle();
     List<String> names() => tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name).toList();
 
-    // No agent is called print-lab, so the name itself is the card.
-    expect(find.text('print-lab'), findsOneWidget);
+    // No agent is called print-lab, so the name itself is the card, and it
+    // reads like any other: a dot, the name, what is under it.
+    expect(find.textContaining('print-lab @srv'), findsOneWidget);
+    expect(find.text('2 agents'), findsOneWidget);
     expect(names(), ['print-lab/fans', 'print-lab/scraper']);
 
-    await tester.tap(find.text('print-lab'));
+    await tester.tap(find.text('2 agents'));
     await tester.pumpAndSettle();
     expect(names(), isEmpty);
-    expect(find.text('print-lab'), findsOneWidget);
+    expect(find.text('2 agents'), findsOneWidget);
 
     state.dispose();
     await hub.events.close();
