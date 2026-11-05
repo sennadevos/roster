@@ -1,6 +1,8 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_svg/flutter_svg.dart';
 
+import '../platform/platform.dart';
+
 /// A drawing an agent made, shown where it wrote it.
 ///
 /// An agent that is asked to draw something writes an ```svg fence, or just
@@ -136,15 +138,25 @@ List<Uri> svgLinksIn(String text) {
 /// A drawing that lives at a URL. It is fetched when it comes into view; if it
 /// cannot be reached - the machine is off, the page is another origin - the
 /// message keeps its link and nothing shouts about it.
-class NetworkSvg extends StatelessWidget {
+class NetworkSvg extends StatefulWidget {
   const NetworkSvg(this.url, {super.key});
 
   final Uri url;
 
   @override
+  State<NetworkSvg> createState() => _NetworkSvgState();
+}
+
+class _NetworkSvgState extends State<NetworkSvg> {
+  double _aspect = 16 / 9;
+
+  @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final cs = theme.colorScheme;
+    final view = platformImageView(widget.url, onSize: (a) {
+      if (mounted && a != _aspect) setState(() => _aspect = a);
+    });
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 6),
       child: Container(
@@ -157,12 +169,14 @@ class NetworkSvg extends StatelessWidget {
         padding: const EdgeInsets.all(12),
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxHeight: 420),
-          child: SvgPicture.network(
-            url.toString(),
-            fit: BoxFit.contain,
-            placeholderBuilder: (_) => const SizedBox(height: 60),
-            errorBuilder: (context, error, stack) => const SizedBox.shrink(),
-          ),
+          child: view == null
+              ? SvgPicture.network(
+                  widget.url.toString(),
+                  fit: BoxFit.contain,
+                  placeholderBuilder: (_) => const SizedBox(height: 60),
+                  errorBuilder: (context, error, stack) => const SizedBox.shrink(),
+                )
+              : AspectRatio(aspectRatio: _aspect, child: view),
         ),
       ),
     );

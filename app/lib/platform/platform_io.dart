@@ -1,3 +1,4 @@
+import 'package:flutter/widgets.dart';
 import 'package:flutter/services.dart';
 import 'package:http/http.dart' as http;
 import 'package:url_launcher/url_launcher.dart';
@@ -37,3 +38,7 @@ void Function() onWindowFocus(void Function() callback) => () {};
 /// field itself (ContentInsertionConfiguration), not here, so this does
 /// nothing and stops nothing.
 void Function() onImagePaste(void Function(String name, Uint8List bytes) got) => () {};
+
+/// Outside the browser there is no cross-origin rule, so a drawing at a URL is
+/// fetched and parsed like any other: nothing special is needed here.
+Widget? platformImageView(Uri url, {void Function(double aspect)? onSize}) => null;

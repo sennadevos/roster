@@ -4,6 +4,8 @@ import 'dart:js_interop';
 import 'package:fetch_client/fetch_client.dart';
 import 'package:http/http.dart' as http;
 import 'package:web/web.dart' as web;
+import 'dart:ui_web' as ui_web;
+import 'package:flutter/widgets.dart';
 
 import '../api/hub_client.dart';
 import '../state/app_state.dart';
@@ -104,4 +106,33 @@ void Function() onImagePaste(void Function(String name, Uint8List bytes) got) {
   }).toJS;
   web.document.addEventListener('paste', listener);
   return () => web.document.removeEventListener('paste', listener);
+}
+
+final _viewed = <String>{};
+
+/// A drawing at a URL, shown through a plain `<img>` element.
+///
+/// The browser will not let the page *read* a file from another origin unless
+/// that origin says so, and the little Python server an agent publishes its
+/// drawings from says nothing. An `<img>` never had to ask: it is allowed to
+/// draw what it cannot hand over. So on the web a linked drawing goes through
+/// the element rather than through flutter_svg, and `onSize` reports the shape
+/// the file turns out to have once it has loaded.
+Widget? platformImageView(Uri url, {void Function(double aspect)? onSize}) {
+  final id = 'svg:$url';
+  if (_viewed.add(id)) {
+    ui_web.platformViewRegistry.registerViewFactory(id, (int _) {
+      final img = web.HTMLImageElement()
+        ..src = url.toString()
+        ..style.width = '100%'
+        ..style.height = '100%'
+        ..style.objectFit = 'contain';
+      img.onLoad.listen((_) {
+        final w = img.naturalWidth, h = img.naturalHeight;
+        if (w > 0 && h > 0) onSize?.call(w / h);
+      });
+      return img;
+    });
+  }
+  return HtmlElementView(viewType: id);
 }
