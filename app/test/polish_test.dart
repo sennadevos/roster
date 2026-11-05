@@ -490,6 +490,37 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('agents under a name nobody has still make one card', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final hub = FakeHub({});
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({
+      'agents': [row('print-lab/scraper', 'srv', 'idle'), row('print-lab/fans', 'srv', 'idle')],
+      'machines': machines,
+    });
+    await tester.pumpAndSettle();
+    List<String> names() => tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name).toList();
+
+    // No agent is called print-lab, so the name itself is the card.
+    expect(find.text('print-lab'), findsOneWidget);
+    expect(names(), ['print-lab/fans', 'print-lab/scraper']);
+
+    await tester.tap(find.text('print-lab'));
+    await tester.pumpAndSettle();
+    expect(names(), isEmpty);
+    expect(find.text('print-lab'), findsOneWidget);
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
+
   testWidgets('a fold outlives a reorder, and focus pins an agent to the top', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1280, 800);

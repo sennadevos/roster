@@ -335,15 +335,54 @@ List<_Node> _tree(List<Agent> agents) {
   return roots;
 }
 
+/// A card for a name nobody is called: `print-lab`, when only the agents
+/// under it exist. It unfolds like any other card and holds them together.
+class _GroupCard extends StatelessWidget {
+  const _GroupCard(
+      {required this.name, required this.level, required this.count, required this.open, required this.onTap});
+
+  final String name;
+  final int level;
+  final int count;
+  final bool open;
+  final VoidCallback onTap;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 1),
+      child: InkWell(
+        borderRadius: BorderRadius.circular(12),
+        onTap: onTap,
+        child: Padding(
+          padding: EdgeInsets.fromLTRB(12 + level * 14.0, 9, 12, 9),
+          child: Row(children: [
+            Icon(open ? Icons.expand_more : Icons.chevron_right, size: 18, color: cs.onSurfaceVariant),
+            const SizedBox(width: 4),
+            Expanded(
+              child: Text(name,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: theme.textTheme.bodyLarge?.copyWith(
+                      fontWeight: FontWeight.w600, fontSize: 15, height: 1.3, color: cs.onSurfaceVariant)),
+            ),
+            Text('$count', style: theme.textTheme.labelMedium?.copyWith(color: cs.outline)),
+          ]),
+        ),
+      ),
+    );
+  }
+}
+
 /// The rows of [nodes] that are on screen: a folded card hides what is under it.
 List<Agent> _walk(List<_Node> nodes, Set<String> folded) {
   final out = <Agent>[];
   for (final n in nodes) {
     final a = n.agent;
     if (a != null) out.add(a);
-    // A node with no agent of its own is only a name on the way down, so what
-    // is under it is shown whatever the fold says.
-    if (a == null || !folded.contains(n.key)) out.addAll(_walk(n.kids, folded));
+    if (!folded.contains(n.key)) out.addAll(_walk(n.kids, folded));
   }
   return out;
 }
@@ -361,7 +400,16 @@ List<Widget> _cards(
     final a = n.agent;
     final shut = folded.contains(n.key);
     if (a == null) {
-      out.addAll(_cards(n.kids, folded, onFold, tile, level: level));
+      // Nobody is named `print-lab`, but `print-lab/fans` and the rest still
+      // belong together, so the name itself is the card.
+      out.add(_GroupCard(
+        name: n.prefix,
+        level: level,
+        count: _walk([n], const {}).length,
+        open: !shut,
+        onTap: () => onFold(n.key),
+      ));
+      if (!shut) out.addAll(_cards(n.kids, folded, onFold, tile, level: level + 1));
       continue;
     }
     out.add(tile(a,
