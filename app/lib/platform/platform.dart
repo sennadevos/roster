@@ -11,6 +11,8 @@
 /// - `openLink(Uri)`: a link from a message, in a new tab or the right app.
 /// - `reloadPage()`: on web, load the new version of the app.
 /// - `copyText(String)`: the clipboard, also on a plain-HTTP page.
+/// - `onImagePaste(callback)`: on web, an image pasted anywhere in the page;
+///   on Android the text field receives it itself.
 /// - `onWindowFocus(callback)`: on web, called when the browser window gains
 ///   focus; returns a function that stops it. Nothing on Android.
 library;

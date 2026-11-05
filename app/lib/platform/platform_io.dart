@@ -32,3 +32,8 @@ void reloadPage() {}
 
 /// The Android app has no window to focus.
 void Function() onWindowFocus(void Function() callback) => () {};
+
+/// Images pasted into the page. On Android the paste arrives through the text
+/// field itself (ContentInsertionConfiguration), not here, so this does
+/// nothing and stops nothing.
+void Function() onImagePaste(void Function(String name, Uint8List bytes) got) => () {};

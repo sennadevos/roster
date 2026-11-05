@@ -251,7 +251,10 @@ class AssistantBlock extends StatelessWidget {
         alignment: Alignment.centerLeft,
         child: ConstrainedBox(
           constraints: const BoxConstraints(maxWidth: 760),
-          child: MarkdownBody(
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+          MarkdownBody(
             data: fenceBareSvg(text),
             selectable: true,
             onSelectionChanged: (t, sel, _) => _selected(t, sel),
@@ -261,6 +264,11 @@ class AssistantBlock extends StatelessWidget {
               final url = Uri.tryParse(href ?? '');
               if (url != null && const {'http', 'https', 'mailto'}.contains(url.scheme)) openLink(url);
             },
+          ),
+          // A drawing an agent saved and linked instead of writing out is
+          // still a drawing: show it under what it said.
+          for (final url in svgLinksIn(text)) NetworkSvg(url),
+            ],
           ),
         ),
       ),

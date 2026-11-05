@@ -119,3 +119,52 @@ class _SvgBlockState extends State<SvgBlock> {
     );
   }
 }
+
+/// Links to a drawing an agent saved somewhere instead of writing it out: the
+/// picture is fetched and shown under the message, so a link to an `.svg` is
+/// still a drawing rather than homework.
+List<Uri> svgLinksIn(String text) {
+  final out = <Uri>[];
+  for (final m in RegExp(r'https?://[^\s)<>"\x27\]]+', caseSensitive: false).allMatches(text)) {
+    final url = Uri.tryParse(m.group(0)!.replaceAll(RegExp(r'[.,;:]+$'), ''));
+    if (url == null || !url.path.toLowerCase().endsWith('.svg')) continue;
+    if (!out.contains(url)) out.add(url);
+  }
+  return out;
+}
+
+/// A drawing that lives at a URL. It is fetched when it comes into view; if it
+/// cannot be reached - the machine is off, the page is another origin - the
+/// message keeps its link and nothing shouts about it.
+class NetworkSvg extends StatelessWidget {
+  const NetworkSvg(this.url, {super.key});
+
+  final Uri url;
+
+  @override
+  Widget build(BuildContext context) {
+    final theme = Theme.of(context);
+    final cs = theme.colorScheme;
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 6),
+      child: Container(
+        width: double.infinity,
+        decoration: BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.circular(10),
+          border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.6)),
+        ),
+        padding: const EdgeInsets.all(12),
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 420),
+          child: SvgPicture.network(
+            url.toString(),
+            fit: BoxFit.contain,
+            placeholderBuilder: (_) => const SizedBox(height: 60),
+            errorBuilder: (context, error, stack) => const SizedBox.shrink(),
+          ),
+        ),
+      ),
+    );
+  }
+}

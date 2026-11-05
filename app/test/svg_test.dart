@@ -37,6 +37,17 @@ void main() {
     expect(SvgBlock.aspect('<svg xmlns="x">'), closeTo(16 / 9, 1e-9));
   });
 
+  test('a link to an svg is a drawing too', () {
+    const said = 'The SVG of the three new outlines is ready: '
+        'http://10.137.42.3:8791/projects/hair-comb/drawings/outlines-r02.svg (file: drawings/outlines-r02.svg).';
+    expect(svgLinksIn(said).single.toString(),
+        'http://10.137.42.3:8791/projects/hair-comb/drawings/outlines-r02.svg');
+    // the same link twice is one drawing, and a full stop is not part of it
+    expect(svgLinksIn('see http://h/a.svg. and http://h/a.svg again').length, 1);
+    expect(svgLinksIn('http://h/a.svg.').single.toString(), 'http://h/a.svg');
+    expect(svgLinksIn('a page at https://example.com/svg/guide'), isEmpty);
+  });
+
   testWidgets('a drawing renders, and its source is one tap away', (tester) async {
     const drawing = '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 10 10">'
         '<circle cx="5" cy="5" r="4" fill="black"/></svg>';

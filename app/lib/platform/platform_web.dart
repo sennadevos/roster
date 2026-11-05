@@ -1,3 +1,4 @@
+import 'dart:typed_data';
 import 'dart:js_interop';
 
 import 'package:fetch_client/fetch_client.dart';
@@ -78,4 +79,29 @@ void Function() onWindowFocus(void Function() callback) {
   final listener = ((web.Event _) => callback()).toJS;
   web.window.addEventListener('focus', listener);
   return () => web.window.removeEventListener('focus', listener);
+}
+
+/// Images pasted into the page, wherever the cursor is: the browser's paste
+/// event carries the file, and Flutter's own paste only knows text. Returns
+/// the function that stops listening.
+void Function() onImagePaste(void Function(String name, Uint8List bytes) got) {
+  final listener = ((web.Event event) {
+    final items = (event as web.ClipboardEvent).clipboardData?.items;
+    if (items == null) return;
+    for (var i = 0; i < items.length; i++) {
+      final item = items[i];
+      if (item.kind != 'file' || !item.type.startsWith('image/')) continue;
+      final file = item.getAsFile();
+      if (file == null) continue;
+      // a pasted screenshot has no name of its own
+      final name = file.name.isEmpty ? 'pasted.png' : file.name;
+      file.arrayBuffer().toDart.then((buffer) {
+        got(name, buffer.toDart.asUint8List());
+      });
+      event.preventDefault();
+      return;
+    }
+  }).toJS;
+  web.document.addEventListener('paste', listener);
+  return () => web.document.removeEventListener('paste', listener);
 }

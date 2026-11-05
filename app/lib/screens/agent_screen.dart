@@ -111,6 +111,22 @@ class _AgentScreenState extends State<AgentScreen> {
   /// goes to the composer, or to the dialog when the agent asks something.
   void Function()? _offWindowFocus;
 
+  /// Stops the paste listener (web). An image on the clipboard - a screenshot,
+  /// something copied out of a page - goes to the agent with the next prompt,
+  /// without being saved to a file first.
+  void Function()? _offPaste;
+
+  /// Takes an image that was pasted, from the browser or from the Android
+  /// keyboard, and puts it with the next prompt.
+  void _pasted(String name, Uint8List bytes) {
+    if (!mounted) return;
+    if (_photos.length >= 6) {
+      showError(context, 'Six photos is the most a prompt takes');
+      return;
+    }
+    setState(() => _photos.add((name, bytes)));
+  }
+
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
@@ -132,6 +148,7 @@ class _AgentScreenState extends State<AgentScreen> {
     _scroll.addListener(_onScroll);
     AgentScreen.focusRequest.addListener(_focusIn);
     _offWindowFocus = onWindowFocus(_windowFocused);
+    _offPaste = onImagePaste(_pasted);
     _poll = Timer.periodic(const Duration(seconds: 3), (_) {
       final status = _app!.snapshot.byId(widget.agent)?.status;
       if (status == 'working' || status == 'blocked' || _conv.messages.any((m) => m.queued)) {
@@ -147,6 +164,7 @@ class _AgentScreenState extends State<AgentScreen> {
     _voice?.dispose();
     _poll?.cancel();
     _offWindowFocus?.call();
+    _offPaste?.call();
     AgentScreen.focusRequest.removeListener(_focusIn);
     if (AppState.onScreen == widget.agent) AppState.onScreen = null;
     _scroll.dispose();
@@ -556,6 +574,7 @@ class _AgentScreenState extends State<AgentScreen> {
                     onSend: _send,
                     onVoice: voiceEngines != null && !ended && !stale ? _toggleVoice : null,
                     onPhotos: !ended && !stale ? _addPhotos : null,
+                    onPaste: !ended && !stale ? _pasted : null,
                     photoCount: _photos.length + _files.length,
                     voiceOn: _voice?.active ?? false,
                   ),
@@ -1587,11 +1606,15 @@ class _Composer extends StatelessWidget {
     this.onVoice,
     this.voiceOn = false,
     this.onPhotos,
+    this.onPaste,
     this.photoCount = 0,
   });
 
   /// Adds photos to the next prompt; with some added, sending needs no text.
   final VoidCallback? onPhotos;
+
+  /// An image pasted into the field (Android's rich content).
+  final void Function(String name, Uint8List bytes)? onPaste;
   final int photoCount;
 
   /// Starts or stops hands-free voice chat; null where there is no speech engine.
@@ -1649,6 +1672,17 @@ class _Composer extends StatelessWidget {
                           enabled: enabled,
                           minLines: 1,
                           maxLines: 6,
+                          // Android hands a pasted image to the field itself,
+                          // rather than through the clipboard API.
+                          contentInsertionConfiguration: onPaste == null
+                              ? null
+                              : ContentInsertionConfiguration(
+                                  onContentInserted: (content) {
+                                    final bytes = content.data;
+                                    if (bytes == null) return;
+                                    onPaste!(content.uri.split('/').last, Uint8List.fromList(bytes));
+                                  },
+                                ),
                           textCapitalization: TextCapitalization.sentences,
                           style: theme.textTheme.bodyMedium,
                           decoration: InputDecoration(
