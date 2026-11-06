@@ -258,8 +258,13 @@ class _Node {
   DateTime recency = DateTime.fromMillisecondsSinceEpoch(0);
 }
 
+/// The fold that puts everything the user is not looking at out of the way.
+const _restKey = '\u0000rest';
+
 class _ListModel {
   _ListModel(AppState app, String query, {Set<String> folded = const {}}) {
+    // Searching looks everywhere, whatever is folded away.
+    restShut = folded.contains(_restKey) && query.trim().isEmpty;
     final q = query.trim().toLowerCase();
     searching = q.isNotEmpty;
     bool match(Agent a) =>
@@ -280,10 +285,16 @@ class _ListModel {
     // What j/k walks: each agent once, in the order the list shows it. The
     // focus section is the same agents again, so it is not walked twice.
     final seen = <String>{};
-    order = [for (final a in [...needs, ..._walk(roots, folded)]) if (seen.add(a.id)) a];
+    order = [
+      for (final a in [...needs, if (!restShut) ..._walk(roots, folded)])
+        if (seen.add(a.id)) a,
+    ];
   }
 
   late final bool searching;
+
+  /// Everything outside the focus and needs-you sections, folded away.
+  late final bool restShut;
   late final List<Agent> focus;
   late final List<Agent> needs;
   late final List<Agent> parked;
@@ -607,15 +618,16 @@ class _AgentList extends StatelessWidget {
             ),
             for (final a in model.needs) tile(a, indent: false),
           ],
-          if (model.focus.isNotEmpty || model.needs.isNotEmpty)
-            _SectionHeader(
-              icon: Icons.history,
-              color: cs.outline,
-              title: 'By last activity',
-              count: model.order.length - model.needs.length,
-            ),
-          ..._cards(model.roots, app.folded, app.toggleFold, tile),
-          if (model.parked.isNotEmpty)
+          _SectionHeader(
+            icon: Icons.history,
+            color: cs.outline,
+            title: 'By last activity',
+            count: _walk(model.roots, const {}).length,
+            open: !model.restShut,
+            onTap: () => app.toggleFold(_restKey),
+          ),
+          if (!model.restShut) ..._cards(model.roots, app.folded, app.toggleFold, tile),
+          if (!model.restShut && model.parked.isNotEmpty)
             Theme(
               data: theme.copyWith(dividerColor: Colors.transparent),
               child: ExpansionTile(
@@ -863,17 +875,22 @@ class _OfflineBar extends StatelessWidget {
 }
 
 class _SectionHeader extends StatelessWidget {
-  const _SectionHeader({required this.icon, required this.color, required this.title, required this.count});
+  const _SectionHeader(
+      {required this.icon, required this.color, required this.title, required this.count, this.open, this.onTap});
 
   final IconData icon;
   final Color color;
   final String title;
   final int count;
 
+  /// A section that folds away says so with a chevron; null is one that does not.
+  final bool? open;
+  final VoidCallback? onTap;
+
   @override
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
-    return Padding(
+    final row = Padding(
       padding: const EdgeInsets.fromLTRB(20, 10, 20, 4),
       child: Row(
         children: [
@@ -882,9 +899,15 @@ class _SectionHeader extends StatelessWidget {
           Text(title, style: theme.textTheme.labelLarge?.copyWith(color: color, fontWeight: FontWeight.w700)),
           const SizedBox(width: 8),
           Text('$count', style: theme.textTheme.labelMedium?.copyWith(color: color)),
+          if (open != null) ...[
+            const Spacer(),
+            Icon(open! ? Icons.expand_less : Icons.expand_more, size: 18, color: color),
+          ],
         ],
       ),
     );
+    if (onTap == null) return row;
+    return InkWell(onTap: onTap, child: row);
   }
 }
 

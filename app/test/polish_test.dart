@@ -490,6 +490,40 @@ void main() {
     await tester.pump();
   });
 
+  testWidgets('the whole list folds away under its heading, leaving the focus section', (tester) async {
+    tester.view.devicePixelRatio = 1;
+    tester.view.physicalSize = const Size(1280, 800);
+    addTearDown(tester.view.reset);
+    final hub = FakeHub({});
+    final store = MemoryStore()..values[Keys.token] = 'tok-1';
+    final state = AppState(store: store, clientFor: hub.client);
+    await tester.pumpWidget(RosterApp(state: state));
+    await state.load();
+    await tester.pump();
+    hub.sendAgents({
+      'agents': [row('infra', 'srv', 'idle'), row('cad', 'srv', 'idle')],
+      'machines': machines,
+    });
+    await state.toggleFocus('infra@srv');
+    await tester.pumpAndSettle();
+    List<String> names() => tester.widgetList<AgentTile>(find.byType(AgentTile)).map((t) => t.agent.name).toList();
+    expect(names(), ['infra', 'cad', 'infra']);
+
+    await tester.tap(find.text('By last activity'));
+    await tester.pumpAndSettle();
+    // Only what he is looking at is left, and the heading still counts the rest.
+    expect(names(), ['infra']);
+    expect(find.text('2'), findsOneWidget);
+
+    await tester.tap(find.text('By last activity'));
+    await tester.pumpAndSettle();
+    expect(names(), ['infra', 'cad', 'infra']);
+
+    state.dispose();
+    await hub.events.close();
+    await tester.pump();
+  });
+
   testWidgets('agents under a name nobody has still make one card', (tester) async {
     tester.view.devicePixelRatio = 1;
     tester.view.physicalSize = const Size(1280, 800);
