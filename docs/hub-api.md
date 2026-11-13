@@ -118,10 +118,14 @@ Senna's chats with models live in wsw-roster's store on one machine (`chats_bin`
 The app registers with the UnifiedPush distributor on the phone (the ntfy app) and gives the hub its endpoint. The hub posts to it with `Authorization: Bearer <token>` from `~/.config/secrets/ntfy-roster-hub-token` (an ntfy token allowed to write `up*` topics). Body: JSON
 
 ```json
-{"type": "blocked|asking|finished|error", "agent": "name@machine", "title": "…", "body": "…"}
+{"type": "blocked|waiting|finished|error", "agent": "name@machine", "title": "…", "body": "…"}
 ```
 
-Sent when an agent's status becomes `blocked`; when a turn ends (`working` → `idle`/`done`) after running at least 60 s; when it gets an API error that needs the user (`stalled` with a non-transient error, or `gave_up`). The hub derives these from consecutive agent lists. Not sent for the agent the device is viewing right now? It cannot know; the app drops a push for the agent on screen.
+Sent when an agent's status becomes `blocked`; when a turn ends (`working` → `idle`/`done`) after running at least 60 s; when it gets an API error that needs the user (`stalled` with a non-transient error, or `gave_up`). The hub derives these from consecutive agent lists.
+
+While a question stays open (`waiting`, `blocked`, or an error that needs the user), the hub sends the same push again 10, 30 and 60 minutes after it was asked and then every hour until it is answered, except between 23:00 and 08:00 hub time; the first after the night comes at 08:00. A reminder carries `"repeat": n` (1, 2, …) and its title ends in `· still, after <time>`, so the app can make it louder than the first.
+
+Not sent for the agent the device is viewing right now? It cannot know; the app drops a push for the agent on screen.
 
 ## 3. The app
 

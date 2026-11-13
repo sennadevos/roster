@@ -90,7 +90,7 @@ When you end a turn because you need the user (an OK, a decision, an answer, som
 roster waiting "OK to push to develop? I'm not sure develop is what staging deploys from"
 ```
 
-One line: what you need, so the user can act from a notification. The app lists you under Needs you and the phone gets a push. It clears itself when the user next prompts you (mail wake-ups don't count); `roster waiting --clear` withdraws it. Don't use it for progress reports or rhetorical questions, only when you really cannot go on without them.
+One line: what you need, so the user can act from a notification. The app lists you under Needs you and the phone gets a push, repeated after 10, 30 and 60 minutes and then every hour (not at night) until the user answers. It clears itself when the user next prompts you (mail wake-ups don't count); `roster waiting --clear` withdraws it. Don't use it for progress reports or rhetorical questions, only when you really cannot go on without them.
 
 ## Drawing
 

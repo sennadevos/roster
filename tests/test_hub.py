@@ -484,5 +484,53 @@ class ListenTest(unittest.TestCase):
 
 
 
+class RemindTest(unittest.TestCase):
+    """An unanswered question is pushed again on a widening schedule, and stops once answered."""
+
+    def setUp(self):
+        import importlib.machinery, importlib.util, queue
+        loader = importlib.machinery.SourceFileLoader("roster_hub", HUB)
+        spec = importlib.util.spec_from_loader("roster_hub", loader)
+        self.mod = importlib.util.module_from_spec(spec)
+        loader.exec_module(self.mod)
+        self.hub = self.mod.Hub.__new__(self.mod.Hub)
+        self.hub.lock = threading.Lock()
+        self.hub.open_asks = {}
+        self.hub.pushes = queue.Queue()
+        self.now = time.time()
+        self.mod.time = type("T", (), {"time": lambda _=None: self.now, "localtime": time.localtime})()
+        self.mod.quiet_now = lambda: self.quiet
+        self.quiet = False
+
+    def step(self, minutes, rows):
+        self.now += 60 * minutes
+        self.hub.snapshot = {"agents": rows}
+        self.hub.remind()
+        got = []
+        while not self.hub.pushes.empty():
+            got.append(self.hub.pushes.get_nowait())
+        return got
+
+    def test_reminds_until_answered(self):
+        asked = time.strftime("%Y-%m-%dT%H:%M:%S%z", time.localtime(self.now))
+        waiting = [{"agent": "p@h", "status": "idle", "waiting": {"text": "Is the bed clear?", "at": asked}}]
+        self.assertEqual(self.step(0, waiting), [])
+        self.assertEqual(self.step(9, waiting), [])
+        got = self.step(2, waiting)
+        self.assertEqual([(k, a["repeat"]) for k, _, _, a in got], [("waiting", 1)])
+        self.assertEqual(self.step(1, waiting), [])        # next one 20 min later
+        self.assertEqual(len(self.step(20, waiting)), 1)
+        self.quiet = True                                   # night: nothing
+        self.assertEqual(self.step(300, waiting), [])
+        self.quiet = False                                  # morning: one, not a burst
+        self.assertEqual(len(self.step(1, waiting)), 1)
+        self.assertEqual(self.step(1, waiting), [])
+        self.assertEqual(self.step(30, [{"agent": "p@h", "status": "working"}]), [])  # answered
+        self.assertEqual(self.hub.open_asks, {})
+        # a blocked dialog counts too
+        blocked = [{"agent": "p@h", "status": "blocked", "status_at": asked}]
+        self.assertEqual([k for k, *_ in self.step(1, blocked)], ["blocked"])
+
+
 if __name__ == "__main__":
     unittest.main()

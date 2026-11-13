@@ -115,6 +115,11 @@ PEER_EVERY = 120
 # others need the user.
 TRANSIENT = ("rate_limit", "overloaded", "server_error", "unknown")
 FINISHED_AFTER = 60
+# A question to Senna that is still open is pushed again, until answered:
+# these many minutes after the last push, then every last gap. Not at night
+# (hub local time); the morning's first comes when the night ends.
+REMIND_GAPS = (10, 20, 30, 60)
+QUIET_HOURS = (23, 8)
 ENDED = ("gone", "left")
 
 
@@ -495,6 +500,30 @@ def needs_you(row):
     return bool(st) and bool(st.get("gave_up") or st.get("error") not in TRANSIENT)
 
 
+def open_ask(row):
+    """(kind, key) while an agent waits on Senna, else None. The key changes with a new question."""
+    if row.get("stale") or row.get("status") in ENDED:
+        return None
+    if row.get("waiting"):
+        w = row["waiting"]
+        return "waiting", json.dumps(w, sort_keys=True) if isinstance(w, dict) else str(w)
+    if row.get("status") == "blocked":
+        return "blocked", row.get("status_at") or "blocked"
+    if needs_you(row):
+        return "error", json.dumps(row.get("stalled"), sort_keys=True)
+    return None
+
+
+def quiet_now():
+    start, end = QUIET_HOURS
+    h = time.localtime().tm_hour
+    return h >= start or h < end
+
+
+def ago(mins):
+    return "%d min" % mins if mins < 90 else "%d h" % round(mins / 60)
+
+
 class Hub:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -508,6 +537,7 @@ class Hub:
         self.local = None          # this machine's roster name
         self.peer_state = {}       # machine -> (reachable, error), from `roster peer list`
         self.working_since = {}    # agent -> when the hub first saw it working
+        self.open_asks = {}        # agent -> [key, asked at, reminders sent, next at]
         self.pushes = queue.Queue(maxsize=256)
         self.no_token_logged = False
         self.events_proc = None
@@ -619,6 +649,7 @@ class Hub:
             self.wake.clear()
             try:
                 self.publish(self.agents())
+                self.remind()
             except HttpError as exc:
                 log("roster list: %s" % exc.message)
                 time.sleep(5)
@@ -679,12 +710,44 @@ class Hub:
                     kind, took = "finished", end - start
             if kind:
                 try:
-                    self.pushes.put_nowait((kind, r, took))
+                    self.pushes.put_nowait((kind, r, took, None))
                 except queue.Full:
                     log("push queue full; dropping a %s push" % kind)
         for a in list(self.working_since):
             if rows.get(a, {}).get("status") != "working":
                 del self.working_since[a]
+
+    def remind(self):
+        """Push again about a question Senna has not answered, until it is answered."""
+        with self.lock:
+            snap = self.snapshot
+        if snap is None:
+            return
+        t = time.time()
+        rows = {r["agent"]: r for r in snap["agents"]}
+        for a, r in rows.items():
+            ask = open_ask(r)
+            if ask is None:
+                self.open_asks.pop(a, None)
+                continue
+            kind, key = ask
+            got = self.open_asks.get(a)
+            if got is None or got[0] != key:
+                since = stamp(r.get("status_at")) or t
+                if kind == "waiting" and isinstance(r["waiting"], dict):
+                    since = stamp(r["waiting"].get("at")) or since
+                self.open_asks[a] = got = [key, since, 0, since + 60 * REMIND_GAPS[0]]
+            if t < got[3] or quiet_now():
+                continue
+            got[2] += 1
+            got[3] = t + 60 * REMIND_GAPS[min(got[2], len(REMIND_GAPS) - 1)]
+            try:
+                self.pushes.put_nowait((kind, r, None, {"repeat": got[2], "asked": got[1]}))
+            except queue.Full:
+                log("push queue full; dropping a reminder")
+        for a in list(self.open_asks):
+            if a not in rows:
+                del self.open_asks[a]
 
     def message(self, kind, row, took):
         """The push body. Looks at the screen or the transcript for a line worth reading; falls back to the role."""
@@ -721,7 +784,7 @@ class Hub:
 
     def pusher(self):
         while True:
-            kind, row, took = self.pushes.get()
+            kind, row, took, again = self.pushes.get()
             try:
                 devices = [d for d in load_devices() if d.get("push")]
                 if not devices:
@@ -729,7 +792,11 @@ class Hub:
                 token = self.push_token()
                 if token is None:
                     continue
-                msg = json.dumps(self.message(kind, row, took)).encode()
+                m = self.message(kind, row, took)
+                if again:
+                    mins = int((time.time() - again["asked"]) // 60)
+                    m.update(repeat=again["repeat"], title="%s · still, after %s" % (m["title"], ago(mins)))
+                msg = json.dumps(m).encode()
                 for d in devices:
                     self.send_push(d, token, msg)
             except Exception:

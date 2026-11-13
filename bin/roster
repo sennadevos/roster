@@ -4399,7 +4399,9 @@ def cmd_hook(args):
         ctx = "[roster] You are on the agent roster as %s (role: %s); %d unread. " \
               "The roster skill has the commands. The user may read you in the roster app on another " \
               "machine, where a local file path shows nothing: to show a picture, put it in the " \
-              "message as an ```svg fence (d2 or graphviz output too)." % (e["name"], e.get("role") or "-", n)
+              "message as an ```svg fence (d2 or graphviz output too). When you cannot go on without the " \
+              "user, say so with `roster waiting \"...\"` as well as in the chat: that keeps reminding them " \
+              "until they answer; a question only in the chat is easy to miss." % (e["name"], e.get("role") or "-", n)
         if e.get("temp"):
             ctx += " This is a quick session: it ends, and leaves the roster, when its window closes. " \
                    "If the work turns out to be worth keeping, `roster rename <name> --role \"...\"` " \
