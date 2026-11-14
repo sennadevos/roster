@@ -791,12 +791,29 @@ def trust_folder(cwd):
         time.sleep(0.2)
 
 
+def scoped(name, argv):
+    """argv in a systemd scope of its own, beside roster-tmux in user.slice.
+
+    systemd-oomd kills a whole cgroup under memory pressure. With every agent
+    in the tmux server's unit, one agent's build took all of them down; in a
+    scope each, it takes the one that used the memory. Left as it is where
+    there is no systemd user manager (WSL without systemd) or no systemd-run.
+    """
+    runtime = os.environ.get("XDG_RUNTIME_DIR") or ""
+    if config().get("agent_scopes") is False or not shutil.which("systemd-run") \
+            or not os.path.exists(os.path.join(runtime, "systemd", "private")):
+        return argv
+    unit = "roster-%s-%s" % (re.sub(r"[^A-Za-z0-9_-]", "_", name)[:60], secrets.token_hex(3))
+    return ["systemd-run", "--user", "--scope", "--quiet", "--collect", "--slice=user.slice",
+            "--unit=" + unit, "--description=roster agent " + name, "--"] + list(argv)
+
+
 def start_session(name, cwd, claude_args, raw=False):
     """A detached tmux session running claude in cwd (or, raw, that argv as it
     is); returns its session id."""
     ensure_server()
     trust_folder(cwd)
-    argv = claude_args if raw else agent_argv(claude_args)
+    argv = scoped(name, claude_args if raw else agent_argv(claude_args))
     pane = tmux("new-session", "-d", "-P", "-F", "#{session_id}", "-s", name, "-c", cwd,
                 *agent_env(), *argv).split()[0]
     tmux("set-option", "-t", pane, "@roster", name)
@@ -1330,15 +1347,52 @@ def cmd_send(args):
 
     # One id for every copy, so replies to a wildcard message can cite it.
     msg_id = uuid.uuid4().hex[:12]
+    refused = []
     for target in targets:
         to = target["name"]
+        why = cannot_take_mail(target, matched.get(to))
+        if why:
+            refused.append("%s %s" % (to, why))
+            continue
         deliver(sender["name"], to, body, args.reply_to, to_filter=flt, msg_id=msg_id)
         print("sent %s to %s: %s" % (msg_id, to, wake(sender, target, matched.get(to), unpark_ok=not flt)))
     for m, names in sorted(remote.items()):
         payload = {"from": sender["name"], "to": names, "body": body, "in_reply_to": args.reply_to,
                    "to_filter": flt, "id": msg_id}
-        for line in send_remote(m, payload):
-            print(line)
+        try:
+            got = send_remote(m, payload)
+        except Unreachable as exc:
+            refused += ["%s@%s: that machine does not answer (%s)" % (n, m, exc) for n in names]
+            continue
+        for r in got:
+            if r.get("error"):
+                refused.append("%s@%s %s" % (r["to"], m, r["error"]))
+            else:
+                print("sent %s to %s@%s: %s" % (msg_id, r["to"], m, r["result"]))
+    if refused and not flt:
+        raise Fail("not sent: %s. Resume it first (roster resume), or send to someone else." % "; ".join(refused))
+    for line in refused:
+        print("not sent to %s" % line)
+
+
+def cannot_take_mail(target, a):
+    """Why an agent cannot take mail now, or None. Mail is never left for an
+    agent that will not read it: the sender would wait for a reply that cannot
+    come. A parked agent can take it (the mail resumes it)."""
+    status = target.get("status")
+    if status == PARKED:
+        return None
+    if status in ENDED:
+        why = target.get("end_reason")
+        return "is %s%s" % (status, " (%s)" % why if why and why != "other" else "")
+    if a is None:
+        return "is not running"
+    if is_sdk(target):
+        try:
+            control(target, "status", timeout=5)
+        except Fail:
+            return "does not answer (its runner is not reachable)"
+    return None
 
 
 def wake(sender, target, a, unpark_ok=True):
@@ -3028,16 +3082,11 @@ def check_free(name, local=True):
 
 
 def send_remote(mach, payload):
-    """Deliver to agents on a peer; queue it in the outbox when the peer is unreachable."""
-    try:
-        flush_outbox(mach)
-        got = rpc(mach, "deliver", data=payload)
-        return ["sent %s to %s@%s: %s" % (payload["id"], r["to"], mach, r["result"]) for r in got["results"]]
-    except Unreachable as exc:
-        write_atomic(os.path.join(OUTBOX, mach, "%d.%s.json" % (time.time_ns(), payload["id"])),
-                     json.dumps(payload))
-        return ["queued %s for %s@%s: %s; it goes out when that machine answers"
-                % (payload["id"], n, mach, exc) for n in payload["to"]]
+    """Deliver to agents on a peer; its per-recipient results ({"to", "result"}
+    or {"to", "error"}). Raises Unreachable: mail is not queued for a machine
+    that does not answer, as its agents cannot reply."""
+    flush_outbox(mach)  # what older versions queued
+    return rpc(mach, "deliver", data=payload)["results"]
 
 
 def flush_outbox(mach):
@@ -3673,7 +3722,11 @@ def cmd_rpc(args):
             for to in p["to"]:
                 target = load(to)
                 if not target:
-                    results.append({"to": to, "result": "no agent named %s here" % to})
+                    results.append({"to": to, "error": "is not an agent here"})
+                    continue
+                why = cannot_take_mail(target, matched.get(to))
+                if why:
+                    results.append({"to": to, "error": why})
                     continue
                 deliver(p["from"], to, p["body"], p.get("in_reply_to"), to_filter=p.get("to_filter"),
                         msg_id=p.get("id"), from_machine=caller)

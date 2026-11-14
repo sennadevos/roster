@@ -63,7 +63,8 @@ roster send <name> --reply-to <id> "answer"
 roster send 'rator-firmware/+' "message"   # a wildcard reaches every live match, except you
 ```
 
-- A send returns at once. If the recipient is idle and its pane is not focused, it is woken with a short prompt. Otherwise it gets the message mid-turn or on its next turn.
+- A send returns at once. If the recipient is idle and its pane is not focused, it is woken with a short prompt. Otherwise it gets the message mid-turn or on its next turn. Mail to a parked agent resumes it.
+- A send to an agent that is gone, not running, or whose machine does not answer is refused with a non-zero exit, and nothing is queued: it could not reply. Don't wait for an answer then; resume it (`roster resume <name>`) or ask someone else.
 - Make a message self-contained: the recipient does not see your conversation. Name files by absolute path.
 - For roster members, use `roster send`, not the native SendMessage tool, so the mail lands in the inbox the roster tracks.
 
@@ -74,7 +75,7 @@ The roster can span several machines. Each one keeps its own agents, and `roster
 - Paths, files, ports and running processes on another machine are not yours, and yours are not theirs. Send the content itself, not a path. Name a repo by its remote (`github.com/...`), not by a local checkout.
 - Address it as `name@machine` when a bare name could be ambiguous; `roster send` finds a unique bare name on any machine.
 - Mail from another machine says so in its header, with the address to reply to.
-- When that machine is unreachable, `roster list` shows its last known state and `roster send` queues the message until it answers.
+- When that machine is unreachable, `roster list` shows its last known state and `roster send` to its agents fails.
 
 ## Receiving
 
