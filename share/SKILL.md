@@ -119,7 +119,7 @@ Goals are optional: most conversations have none, and nothing requires you to jo
 These are for the user, from a terminal, the tray or a keybinding. Run them only when the user asks.
 
 ```bash
-roster new [dir] [--name N] [--role R] [--prompt P] [--harness sdk|claude]
+roster new [dir] [--name N] [--role R] [--prompt P] [--harness sdk|claude]   # dir is made if missing (under home)
                         # start an agent in a roster tmux session; from a terminal it
                         # opens right there, else (or with --window) in a new window.
                         # New agents run on the Agent SDK (harness sdk) unless claude is asked for

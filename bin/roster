@@ -2170,11 +2170,13 @@ def new_agent(cwd, name, role, prompt, model=None, effort=None, temp=False, mkdi
     """Start an agent in a roster tmux session on this machine; return its entry."""
     cwd = os.path.realpath(os.path.expanduser(cwd or os.getcwd()))
     if not os.path.isdir(cwd):
+        # A new agent's folder is made for it, parents and all, under the home
+        # folder; elsewhere (another user's tree, /usr) it must exist already.
+        # `mkdir` is what older callers pass; it is always on now.
         home = os.path.realpath(os.path.expanduser("~"))
-        if mkdir and cwd.startswith(home + os.sep) and os.path.isdir(os.path.dirname(cwd)):
-            os.mkdir(cwd)  # a new project folder, one level under an existing one
-        else:
+        if not cwd.startswith(home + os.sep) or os.path.exists(cwd):
             raise Fail("no such directory: %s" % cwd)
+        os.makedirs(cwd)
     scratch = not name
     if name:
         check_free(check_name(name))
@@ -4550,7 +4552,7 @@ def main():
     s.set_defaults(fn=cmd_inbox)
 
     s = sub.add_parser("new", help="start an agent in its own tmux session; attach here, or in a new window")
-    s.add_argument("cwd", nargs="?", help="working directory (default: here, or home on another machine)")
+    s.add_argument("cwd", nargs="?", help="working directory, made if it is missing under home (default: here, or home on another machine)")
     s.add_argument("--on", metavar="MACHINE", help="start it on a peer machine")
     s.add_argument("--name", help="roster name (default: a random placeholder the agent renames)")
     s.add_argument("--role", help="its one-line role on the roster")
