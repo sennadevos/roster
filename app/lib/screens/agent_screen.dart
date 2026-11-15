@@ -140,9 +140,10 @@ class _AgentScreenState extends State<AgentScreen> {
     unawaited(_conv.open());
     AppState.onScreen = widget.agent;
     unawaited(app.push.clear(widget.agent).catchError((_) {}));
-    final row = app.snapshot.byId(widget.agent);
+    final row = app.row(widget.agent);
     _seen = row?.fingerprint;
     if (row?.status == 'blocked') _conv.fetchScreen();
+    if (row == null) unawaited(app.lookUp(widget.agent).catchError((_) {}));
     app.addListener(_onApp);
     _conv.addListener(_onConv);
     _scroll.addListener(_onScroll);
@@ -150,7 +151,7 @@ class _AgentScreenState extends State<AgentScreen> {
     _offWindowFocus = onWindowFocus(_windowFocused);
     _offPaste = onImagePaste(_pasted);
     _poll = Timer.periodic(const Duration(seconds: 3), (_) {
-      final status = _app!.snapshot.byId(widget.agent)?.status;
+      final status = _app!.row(widget.agent)?.status;
       if (status == 'working' || status == 'blocked' || _conv.messages.any((m) => m.queued)) {
         unawaited(_conv.fetchNew());
       }
@@ -185,7 +186,7 @@ class _AgentScreenState extends State<AgentScreen> {
   }
 
   void _focusIn() {
-    final row = _app!.snapshot.byId(widget.agent);
+    final row = _app!.row(widget.agent);
     if (row?.status == 'blocked' && _conv.screen?.dialog != null) {
       _dialogFocus.requestFocus();
     } else {
@@ -196,7 +197,7 @@ class _AgentScreenState extends State<AgentScreen> {
   /// Every change to this agent's row (status, unread, anything) means
   /// there may be more to read, and a new dialog when it is blocked.
   void _onApp() {
-    final row = _app!.snapshot.byId(widget.agent);
+    final row = _app!.row(widget.agent);
     if (row == null || row.fingerprint == _seen) return;
     _seen = row.fingerprint;
     _conv.fetchNew();
@@ -272,7 +273,7 @@ class _AgentScreenState extends State<AgentScreen> {
       final (input, output) = engines();
       v = _voice = VoiceSession(
         conversation: _conv,
-        row: () => _app!.snapshot.byId(widget.agent),
+        row: () => _app!.row(widget.agent),
         changes: _app!,
         input: input,
         output: output,
@@ -479,7 +480,7 @@ class _AgentScreenState extends State<AgentScreen> {
   @override
   Widget build(BuildContext context) {
     final app = AppScope.of(context);
-    final row = app.snapshot.byId(widget.agent);
+    final row = app.row(widget.agent);
     final status = row?.status ?? 'unknown';
     final ended = row?.ended ?? false;
     final blocked = status == 'blocked';

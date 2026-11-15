@@ -316,7 +316,28 @@ class AppState extends ChangeNotifier with WidgetsBindingObserver {
 
   void _apply(AgentsSnapshot s) {
     snapshot = s;
+    _offList.removeWhere((id, _) => s.byId(id) != null);
     haveSnapshot = true;
+    notifyListeners();
+  }
+
+  /// Rows looked up because they are not in the live list (ended agents,
+  /// unless "Show ended agents" is on). The live list wins when it has one.
+  final Map<String, Agent> _offList = {};
+
+  /// An agent's row, from the live list or, for an ended agent, the full one.
+  Agent? row(String id) => snapshot.byId(id) ?? _offList[id];
+
+  /// An agent opened from anywhere but the list (in focus, a notification, a
+  /// link) may have ended, so it is not in the live list; fetch its row from
+  /// the full list once, so its screen knows it ended and offers Resume.
+  Future<void> lookUp(String id) async {
+    final c = client;
+    if (c == null || snapshot.byId(id) != null) return;
+    final all = await c.agents(all: true);
+    final found = all.byId(id);
+    if (found == null) return;
+    _offList[id] = found;
     notifyListeners();
   }
 
